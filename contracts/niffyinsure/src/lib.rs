@@ -1,23 +1,19 @@
 #![no_std]
-#![allow(dead_code)] // stub modules; removed once domain features are implemented
 
 mod claim;
 mod policy;
+#[allow(dead_code)] // used by policy.rs once feat/policy-lifecycle lands
 mod premium;
 mod storage;
 mod token;
-mod types;
+pub mod types;
+pub mod validate;
 
 use soroban_sdk::{contract, contractimpl, Address, Env};
 
 #[contract]
 pub struct NiffyInsure;
 
-/// Entry-point contract.
-///
-/// Method stubs are intentionally minimal; each domain module
-/// (policy, claim, token) will attach its implementation here
-/// without renaming these symbols or changing the deployed contract ID.
 #[contractimpl]
 impl NiffyInsure {
     /// One-time initialisation: store admin and token contract address.
@@ -28,12 +24,14 @@ impl NiffyInsure {
     }
 
     // ── Policy domain ────────────────────────────────────────────────────
-    // policy::generate_premium, policy::initiate_policy,
-    // policy::renew_policy, policy::terminate_policy  →  policy.rs
+    // generate_premium, initiate_policy, renew_policy, terminate_policy
+    // implemented in policy.rs — issue: feat/policy-lifecycle
 
     // ── Claim domain ─────────────────────────────────────────────────────
-    // claim::file_claim, claim::vote_on_claim  →  claim.rs
+    // file_claim, vote_on_claim
+    // implemented in claim.rs — issue: feat/claim-voting
 
     // ── Admin / treasury ─────────────────────────────────────────────────
-    // token::drain  →  token.rs
+    // drain
+    // implemented in token.rs — issue: feat/admin
 }
