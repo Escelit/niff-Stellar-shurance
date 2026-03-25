@@ -45,7 +45,7 @@ pub fn file_claim(
 
     env.events().publish(
         (symbol_short!("claim"), symbol_short!("filed"), claimant),
-        claim_id,
+        claim.clone(),
     );
 
     Ok(claim_id)

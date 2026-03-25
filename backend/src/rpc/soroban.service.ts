@@ -308,6 +308,32 @@ export class SorobanService {
   }
 
   /**
+   * Fetch events for the configured contract ID within a ledger range.
+   */
+  async getEvents(startLedger: number, limit = 50): Promise<SorobanRpc.Api.GetEventsResponse> {
+    const server = this.makeServer();
+    return await server.getEvents({
+      startLedger,
+      filters: [
+        {
+          type: 'contract',
+          contractIds: [this.contractId],
+        },
+      ],
+      limit,
+    });
+  }
+
+  /**
+   * Fetch the latest ledger sequence from the network.
+   */
+  async getLatestLedger(): Promise<number> {
+    const server = this.makeServer();
+    const info = await server.getLatestLedger();
+    return info.sequence;
+  }
+
+  /**
    * TypeScript mirror of compute_premium in contracts/niffyinsure/src/premium.rs.
    * Uses BigInt to match Rust i128 integer arithmetic exactly.
    */
