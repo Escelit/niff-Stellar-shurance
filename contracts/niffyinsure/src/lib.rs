@@ -2,7 +2,11 @@
 
 mod claim;
 mod policy;
+<<<<<<< feat/claim-payout-14
 pub mod premium;
+=======
+mod premium;
+>>>>>>> main
 mod storage;
 mod token;
 pub mod types;
@@ -121,4 +125,68 @@ impl NiffyInsure {
     pub fn has_policy(env: Env, holder: Address, policy_id: u32) -> bool {
         storage::has_policy(&env, &holder, policy_id)
     }
+<<<<<<< feat/claim-payout-14
+=======
+
+    // ── Policy domain ────────────────────────────────────────────────────
+
+    /// Turn an accepted quote into an enforceable on-chain policy.
+    ///
+    /// Authenticates the holder, computes premium, transfers payment,
+    /// persists the policy, updates the DAO voter registry, and emits
+    /// a versioned `PolicyInitiated` event for NestJS indexers.
+    pub fn initiate_policy(
+        env: Env,
+        holder: Address,
+        policy_type: types::PolicyType,
+        region: types::RegionTier,
+        coverage: i128,
+        age: u32,
+        risk_score: u32,
+    ) -> Result<types::Policy, policy::PolicyError> {
+        policy::initiate_policy(&env, holder, policy_type, region, coverage, age, risk_score)
+    }
+
+    /// Read-only: retrieve a persisted policy by (holder, policy_id).
+    pub fn get_policy(env: Env, holder: Address, policy_id: u32) -> Option<types::Policy> {
+        storage::get_policy(&env, &holder, policy_id)
+    }
+
+    /// Read-only: number of active policies for a holder (= vote weight).
+    pub fn get_active_policy_count(env: Env, holder: Address) -> u32 {
+        storage::get_active_policy_count(&env, &holder)
+    }
+
+    // ── Admin / pause ────────────────────────────────────────────────────
+
+    /// Admin-only: pause the contract (blocks initiate_policy and future
+    /// mutating entrypoints).
+    pub fn pause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        assert!(admin == stored_admin, "only admin can pause");
+        storage::set_paused(&env, true);
+    }
+
+    /// Admin-only: unpause the contract.
+    pub fn unpause(env: Env, admin: Address) {
+        admin.require_auth();
+        let stored_admin = storage::get_admin(&env);
+        assert!(admin == stored_admin, "only admin can unpause");
+        storage::set_paused(&env, false);
+    }
+
+    /// Read-only: check if the contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
+    }
+
+    // ── Claim domain ─────────────────────────────────────────────────────
+    // file_claim, vote_on_claim
+    // implemented in claim.rs — issue: feat/claim-voting
+
+    // ── Admin / treasury ─────────────────────────────────────────────────
+    // drain
+    // implemented in token.rs — issue: feat/admin
+>>>>>>> main
 }

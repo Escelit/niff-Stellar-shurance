@@ -1,5 +1,4 @@
-use crate::types::MultiplierTable;
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address, Env, Vec};
 
 #[contracttype]
 pub enum DataKey {
@@ -18,6 +17,10 @@ pub enum DataKey {
     Voters,
     /// Global monotonic claim id counter
     ClaimCounter,
+    /// Contract pause flag (bool). Missing ≡ not paused.
+    Paused,
+    /// Per-holder active policy count; used for weighted voting.
+    ActivePolicyCount(Address),
 }
 
 pub fn set_admin(env: &Env, admin: &Address) {
@@ -107,4 +110,82 @@ pub fn has_policy(env: &Env, holder: &Address, policy_id: u32) -> bool {
     env.storage()
         .persistent()
         .has(&DataKey::Policy(holder.clone(), policy_id))
+}
+
+// ── Pause flag ───────────────────────────────────────────────────────────────
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
+}
+
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+// ── Policy persistence ───────────────────────────────────────────────────────
+
+pub fn set_policy(env: &Env, holder: &Address, policy_id: u32, policy: &crate::types::Policy) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::Policy(holder.clone(), policy_id), policy);
+}
+
+pub fn get_policy(env: &Env, holder: &Address, policy_id: u32) -> Option<crate::types::Policy> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Policy(holder.clone(), policy_id))
+}
+
+// ── Voter registry ───────────────────────────────────────────────────────────
+//
+// Vote-weight semantics: **one-policy-one-vote**.
+// Each active policy grants exactly one vote.  A holder with N active policies
+// has N votes in claim governance.  `ActivePolicyCount(holder)` tracks this.
+// `Voters` is a deduplicated Vec<Address> of holders with ≥1 active policy;
+// it is used for quorum denominator calculation.  `vote_on_claim` multiplies
+// each ballot by the holder's `ActivePolicyCount` at vote time.
+
+pub fn get_voters(env: &Env) -> Vec<Address> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Voters)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_voters(env: &Env, voters: &Vec<Address>) {
+    env.storage().instance().set(&DataKey::Voters, voters);
+}
+
+/// Add `holder` to the voter set (if not already present) and increment their
+/// active-policy count by 1.
+pub fn add_voter(env: &Env, holder: &Address) {
+    let mut voters = get_voters(env);
+    // Check membership — linear scan is acceptable for DAO-scale voter sets.
+    let mut found = false;
+    for v in voters.iter() {
+        if v == *holder {
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        voters.push_back(holder.clone());
+    }
+    set_voters(env, &voters);
+
+    // Increment active policy count.
+    let key = DataKey::ActivePolicyCount(holder.clone());
+    let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
+    env.storage().instance().set(&key, &(count + 1));
+}
+
+/// Returns the number of active policies for `holder` (vote weight).
+pub fn get_active_policy_count(env: &Env, holder: &Address) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::ActivePolicyCount(holder.clone()))
+        .unwrap_or(0)
 }
