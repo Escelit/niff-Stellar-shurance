@@ -150,3 +150,24 @@ pub struct Claim {
     pub approve_votes: u32,
     pub reject_votes: u32,
 }
+
+/// Premium quote line item for UX display.
+#[contracttype]
+#[derive(Clone)]
+pub struct PremiumQuoteLineItem {
+    pub component: String,
+    pub factor: i128,
+    pub amount: i128,
+}
+
+/// Structured quote response returned by `generate_premium`.
+///
+/// Field names and ordering are kept stable for SDK bindings consumed by
+/// backend simulation services.
+#[contracttype]
+#[derive(Clone)]
+pub struct PremiumQuote {
+    pub total_premium: i128,
+    pub line_items: Option<Vec<PremiumQuoteLineItem>>,
+    pub valid_until_ledger: u32,
+}
