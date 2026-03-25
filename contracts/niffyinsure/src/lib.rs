@@ -1,5 +1,7 @@
 #![no_std]
 
+mod admin;
+mod calculator;
 mod claim;
 mod policy;
 mod premium;
@@ -8,7 +10,14 @@ mod token;
 pub mod types;
 pub mod validate;
 
-use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracterror, Address, Env, String, Vec};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum InitError {
+    AlreadyInitialized = 200,
+}
 
 #[contract]
 pub struct NiffyInsure;
@@ -17,22 +26,80 @@ pub struct NiffyInsure;
 impl NiffyInsure {
     /// One-time initialisation: store admin and token contract address, and
     /// seed the default premium table so quote generation is deterministic.
-    pub fn initialize(env: Env, admin: Address, token: Address) {
+    pub fn initialize(env: Env, admin: Address, token: Address) -> Result<(), InitError> {
+        if env.storage().instance().has(&storage::DataKey::Admin) {
+            return Err(InitError::AlreadyInitialized);
+        }
         storage::set_admin(&env, &admin);
         storage::set_token(&env, &token);
         storage::set_multiplier_table(&env, &premium::default_multiplier_table(&env));
         storage::set_allowed_asset(&env, &token, true);
+        Ok(())
     }
 
+    // ── Admin: read ───────────────────────────────────────────────────────────
+
+    pub fn get_admin(env: Env) -> Address {
+        storage::get_admin(&env)
+    }
+
+    // ── Admin: calculator address management ──────────────────────────────────
+
+    /// Admin-only: point the policy contract at an external PremiumCalculator.
+    ///
+    /// After this call `generate_premium` and `initiate_policy` will delegate
+    /// pricing to the remote contract.  Set to the zero address (or call
+    /// `clear_calculator`) to revert to the built-in engine.
+    ///
+    /// Emits: ("calc", "set") → (old_addr_or_none, new_addr)
+    pub fn set_calculator(env: Env, calc_addr: Address) {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        let old = storage::get_calc_address(&env);
+        storage::set_calc_address(&env, &calc_addr);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("calc"), soroban_sdk::symbol_short!("set")),
+            (old, calc_addr),
+        );
+    }
+
+    /// Returns the currently configured calculator address, if any.
+    pub fn get_calculator(env: Env) -> Option<Address> {
+        storage::get_calc_address(&env)
+    }
+
+    /// Admin-only: remove the external calculator, reverting to built-in pricing.
+    pub fn clear_calculator(env: Env) {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        env.storage().instance().remove(&storage::DataKey::CalcAddress);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("calc"), soroban_sdk::symbol_short!("cleared")),
+            (),
+        );
+    }
+
+    // ── Premium / quote ───────────────────────────────────────────────────────
+
     /// Pure quote path: reads config and computes premium only.
-    /// This entrypoint intentionally performs no persistent writes.
+    /// Routes to the external calculator when one is configured.
     pub fn generate_premium(
         env: Env,
         input: types::RiskInput,
         base_amount: i128,
         include_breakdown: bool,
     ) -> Result<types::PremiumQuote, validate::Error> {
-        policy::generate_premium(&env, input, base_amount, include_breakdown)
+        validate::check_risk_input(&input)?;
+        if base_amount <= 0 {
+            return Err(validate::Error::InvalidBaseAmount);
+        }
+        calculator::compute_quote(
+            &env,
+            &input,
+            base_amount,
+            include_breakdown,
+            policy::QUOTE_TTL_LEDGERS,
+        )
     }
 
     pub fn quote_error_message(env: Env, code: u32) -> policy::QuoteFailure {
@@ -68,6 +135,9 @@ impl NiffyInsure {
             29 => validate::Error::InvalidAsset,
             30 => validate::Error::InsufficientTreasury,
             31 => validate::Error::AlreadyPaid,
+            33 => validate::Error::CalculatorNotSet,
+            34 => validate::Error::CalculatorCallFailed,
+            35 => validate::Error::CalculatorPaused,
             _ => validate::Error::ClaimNotApproved,
         };
         policy::map_quote_error(&env, err)
@@ -86,11 +156,7 @@ impl NiffyInsure {
         storage::get_multiplier_table(&env)
     }
 
-    pub fn set_allowed_asset(
-        env: Env,
-        asset: Address,
-        allowed: bool,
-    ) {
+    pub fn set_allowed_asset(env: Env, asset: Address, allowed: bool) {
         let admin = storage::get_admin(&env);
         admin.require_auth();
         claim::set_allowed_asset(&env, &asset, allowed);
@@ -130,13 +196,8 @@ impl NiffyInsure {
         storage::get_voters(&env)
     }
 
-    // ── Policy domain ────────────────────────────────────────────────────
+    // ── Policy domain ─────────────────────────────────────────────────────────
 
-    /// Turn an accepted quote into an enforceable on-chain policy.
-    ///
-    /// Authenticates the holder, computes premium, transfers payment,
-    /// persists the policy, updates the DAO voter registry, and emits
-    /// a versioned `PolicyInitiated` event for NestJS indexers.
     pub fn initiate_policy(
         env: Env,
         holder: Address,
@@ -149,50 +210,39 @@ impl NiffyInsure {
         policy::initiate_policy(&env, holder, policy_type, region, coverage, age, risk_score)
     }
 
-    /// Read-only: retrieve a persisted policy by (holder, policy_id).
     pub fn get_policy(env: Env, holder: Address, policy_id: u32) -> Option<types::Policy> {
         storage::get_policy(&env, &holder, policy_id)
     }
 
-    /// Read-only: number of active policies for a holder (= vote weight).
     pub fn get_active_policy_count(env: Env, holder: Address) -> u32 {
         storage::get_active_policy_count(&env, &holder)
     }
 
-    // ── Admin / pause ────────────────────────────────────────────────────
+    // ── Admin / pause ─────────────────────────────────────────────────────────
 
-    /// Admin-only: pause the contract (blocks initiate_policy and future
-    /// mutating entrypoints).
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let stored_admin = storage::get_admin(&env);
-        assert!(admin == stored_admin, "only admin can pause");
-        storage::set_paused(&env, true);
+    pub fn pause(env: Env) {
+        admin::pause(&env);
     }
 
-    /// Admin-only: unpause the contract.
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        let stored_admin = storage::get_admin(&env);
-        assert!(admin == stored_admin, "only admin can unpause");
-        storage::set_paused(&env, false);
+    pub fn unpause(env: Env) {
+        admin::unpause(&env);
     }
 
-    /// Read-only: check if the contract is paused.
-    pub fn is_paused(env: Env) -> bool {
-        storage::is_paused(&env)
+    // ── Admin rotation ────────────────────────────────────────────────────────
+
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        admin::propose_admin(&env, new_admin);
     }
 
-    // ── Admin / treasury ─────────────────────────────────────────────────
-    // drain, set_paused
-    // implemented in token.rs — issue: feat/admin
+    pub fn accept_admin(env: Env) {
+        admin::accept_admin(&env);
+    }
 
-    // ── Test-only helpers ─────────────────────────────────────────────────
-    // These are NOT part of the production ABI; they exist solely to let
-    // integration tests seed state without the full policy-lifecycle feature.
-    // Gated behind the `testutils` feature so they are excluded from WASM builds.
+    pub fn cancel_admin(env: Env) {
+        admin::cancel_admin(&env);
+    }
 
-    /// Seed a policy record and register the holder as a voter.
+    // ── Test-only helpers ─────────────────────────────────────────────────────
     #[cfg(feature = "testutils")]
     pub fn test_seed_policy(
         env: Env,
@@ -219,12 +269,10 @@ impl NiffyInsure {
         storage::add_voter(&env, &holder);
     }
 
-    /// Remove a holder from the live voter set (simulates policy termination).
     #[cfg(feature = "testutils")]
     pub fn test_remove_voter(env: Env, holder: Address) {
         storage::remove_voter(&env, &holder);
     }
 }
 
-// Re-export error type so tests can reference it without the module path.
-pub use claim::ContractError;
+pub use admin::AdminError;

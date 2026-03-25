@@ -2,8 +2,8 @@ use crate::{
     premium,
     storage,
     token,
-    types::{Policy, PolicyType, PremiumQuote, RegionTier},
-    validate,
+    types::{AgeBand, CoverageType, Policy, PolicyType, PremiumQuote, RegionTier, RiskInput},
+    validate::{self, Error},
 };
 use soroban_sdk::{contractevent, contracterror, contracttype, Address, Env, String};
 
@@ -158,6 +158,9 @@ pub fn map_quote_error(env: &Env, err: Error) -> QuoteFailure {
         Error::ReasonTooLong => "termination reason exceeds maximum length",
         Error::ClaimAlreadyTerminal => "claim already reached a terminal status",
         Error::DuplicateVote => "duplicate vote detected",
+        Error::CalculatorNotSet => "no external calculator configured",
+        Error::CalculatorCallFailed => "cross-contract call to premium calculator failed",
+        Error::CalculatorPaused => "premium calculator is paused; policy bind rejected",
     };
     QuoteFailure {
         code: err as u32,
@@ -212,9 +215,22 @@ pub fn initiate_policy(
         return Err(PolicyError::InvalidCoverage);
     }
 
-    // 4. Compute premium (smallest units / stroops)
-    let premium_amount = premium::compute_premium_checked(&policy_type, &region, age, risk_score)
-        .ok_or(PolicyError::PremiumOverflow)?;
+    // 4. Compute premium via the calculator (external or local fallback).
+    //    Map calculator errors to PolicyError so callers get a typed failure.
+    let risk_input = crate::types::RiskInput {
+        region: region.clone(),
+        age_band: age_to_band(age),
+        coverage: risk_score_to_coverage(risk_score),
+        safety_score: 0,
+    };
+    let base_amount = coverage / 10; // 10% of coverage as base
+    let quote = crate::calculator::compute_quote(env, &risk_input, base_amount, false, QUOTE_TTL_LEDGERS)
+        .map_err(|e| match e {
+            validate::Error::CalculatorPaused => PolicyError::ContractPaused,
+            validate::Error::CalculatorCallFailed | validate::Error::CalculatorNotSet => PolicyError::PremiumOverflow,
+            _ => PolicyError::PremiumOverflow,
+        })?;
+    let premium_amount = quote.total_premium;
     if premium_amount <= 0 {
         return Err(PolicyError::InvalidPremium);
     }
@@ -277,4 +293,24 @@ pub fn initiate_policy(
     .publish(env);
 
     Ok(policy)
+}
+
+fn age_to_band(age: u32) -> crate::types::AgeBand {
+    if age < 30 {
+        crate::types::AgeBand::Young
+    } else if age < 60 {
+        crate::types::AgeBand::Adult
+    } else {
+        crate::types::AgeBand::Senior
+    }
+}
+
+fn risk_score_to_coverage(risk_score: u32) -> crate::types::CoverageType {
+    if risk_score <= 3 {
+        crate::types::CoverageType::Basic
+    } else if risk_score <= 7 {
+        crate::types::CoverageType::Standard
+    } else {
+        crate::types::CoverageType::Premium
+    }
 }

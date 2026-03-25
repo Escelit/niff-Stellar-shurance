@@ -41,6 +41,12 @@ pub enum Error {
     InsufficientTreasury = 30,
     AlreadyPaid = 31,
     ClaimNotApproved = 32,
+    /// No external calculator address has been configured.
+    CalculatorNotSet = 33,
+    /// Cross-contract call to the premium calculator failed.
+    CalculatorCallFailed = 34,
+    /// Calculator is paused; bind fails closed.
+    CalculatorPaused = 35,
 }
 
 pub fn check_policy(policy: &Policy) -> Result<(), Error> {
