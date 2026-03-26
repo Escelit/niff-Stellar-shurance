@@ -39,6 +39,7 @@
     "@nestjs/platform-express": "^10.4.5",
     "@nestjs/swagger": "^7.4.2",
     "@nestjs/terminus": "^10.2.1",
+    "@nestjs/schedule": "^4.1.0",
     "@nestjs/throttler": "^6.5.0",
     "@prisma/client": "^6.6.0",
     "@stellar/stellar-sdk": "^14.6.1",
