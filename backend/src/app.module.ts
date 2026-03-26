@@ -16,7 +16,9 @@ import { QuoteModule } from './quote/quote.module';
 import { PolicyModule } from './policy/policy.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { TxModule } from './tx/tx.module';
-import { MaintenanceModule } from './maintenance/maintenance.module';
+import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
+import { OracleHooksController } from './experimental/oracle-hooks.controller';
+import { BetaCalculatorsController } from './experimental/beta-calculators.controller';
 
 @Module({
   imports: [
@@ -43,8 +45,8 @@ import { MaintenanceModule } from './maintenance/maintenance.module';
     PolicyModule,
     NotificationsModule,
     TxModule,
-    MaintenanceModule,
+    FeatureFlagsModule,
   ],
+  controllers: [OracleHooksController, BetaCalculatorsController],
 })
 export class AppModule {}
-
