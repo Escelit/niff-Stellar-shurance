@@ -1,13 +1,20 @@
-import { Metadata } from 'next';
-import { ExternalLink, MessageCircle, BookOpen } from 'lucide-react';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { FaqAccordion } from '@/components/support/faq-accordion';
-import { ContactForm } from '@/components/support/contact-form';
-import { FAQ_ITEMS } from '@/lib/faq-data';
+import { Metadata } from "next";
+import { ExternalLink, MessageCircle, BookOpen } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "@/components/ui/card";
+import { FaqAccordion } from "@/components/support/faq-accordion";
+import { ContactForm } from "@/components/support/contact-form";
+import { FAQ_ITEMS } from "@/lib/faq-data";
 
 export const metadata: Metadata = {
-  title: 'Support — NiffyInsur',
-  description: 'Get help with NiffyInsur. Browse FAQs or contact our support team.',
+  title: "Support — NiffyInsur",
+  description:
+    "Get help with NiffyInsur. Browse FAQs or contact our support team.",
 };
 
 export default function SupportPage() {
@@ -32,7 +39,9 @@ export default function SupportPage() {
           <MessageCircle className="h-5 w-5 text-primary shrink-0" />
           <div>
             <p className="font-medium text-sm">Discord Community</p>
-            <p className="text-xs text-muted-foreground">Chat with the community</p>
+            <p className="text-xs text-muted-foreground">
+              Chat with the community
+            </p>
           </div>
           <ExternalLink className="ml-auto h-4 w-4 text-muted-foreground" />
         </a>
@@ -45,7 +54,9 @@ export default function SupportPage() {
           <BookOpen className="h-5 w-5 text-primary shrink-0" />
           <div>
             <p className="font-medium text-sm">Documentation</p>
-            <p className="text-xs text-muted-foreground">Guides and API reference</p>
+            <p className="text-xs text-muted-foreground">
+              Guides and API reference
+            </p>
           </div>
           <ExternalLink className="ml-auto h-4 w-4 text-muted-foreground" />
         </a>
@@ -53,7 +64,9 @@ export default function SupportPage() {
 
       {/* FAQ */}
       <section aria-labelledby="faq-heading">
-        <h2 id="faq-heading" className="text-xl font-semibold mb-4">Frequently Asked Questions</h2>
+        <h2 id="faq-heading" className="text-xl font-semibold mb-4">
+          Frequently Asked Questions
+        </h2>
         <FaqAccordion items={FAQ_ITEMS} />
       </section>
 
