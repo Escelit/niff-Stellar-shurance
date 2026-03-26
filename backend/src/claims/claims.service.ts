@@ -12,10 +12,15 @@ import {
   SanitizedEvidenceDto,
   VoteTalliesDto,
 } from './dto/claim.dto';
+import {
+  buildKeysetWhere,
+  buildNextCursor,
+  clampLimit,
+} from '../helpers/pagination';
 
 interface ListClaimsParams {
-  page: number;
-  limit: number;
+  after?: string;
+  limit?: number;
   status?: string;
 }
 
@@ -47,9 +52,9 @@ export class ClaimsService {
   }
 
   async listClaims(params: ListClaimsParams): Promise<ClaimsListResponseDto> {
-    const { page, limit, status } = params;
-    const skip = (page - 1) * limit;
-    const cacheKey = `claims:list:${page}:${limit}:${status || 'all'}`;
+    const { after, status } = params;
+    const limit = clampLimit(params.limit);
+    const cacheKey = `claims:list:${after ?? 'start'}:${limit}:${status ?? 'all'}`;
     const cached = await this.redis.get<ClaimsListResponseDto>(cacheKey);
 
     if (cached) {
@@ -58,33 +63,30 @@ export class ClaimsService {
     }
 
     const lastLedger = await this.getLastLedger();
-    const where: Prisma.ClaimWhereInput | undefined = status
+    const statusFilter = status
       ? { status: status.toUpperCase() as 'PENDING' | 'APPROVED' | 'PAID' | 'REJECTED' }
-      : undefined;
+      : {};
+    const keysetWhere = buildKeysetWhere(after);
+    const where: Prisma.ClaimWhereInput = {
+      ...statusFilter,
+      ...(keysetWhere ?? {}),
+    };
 
     const [claims, total] = await Promise.all([
       this.prisma.claim.findMany({
         where,
-        include: {
-          votes: {
-            select: { vote: true },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip,
+        include: { votes: { select: { vote: true } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
       }),
-      this.prisma.claim.count({ where }),
+      this.prisma.claim.count({ where: statusFilter }),
     ]);
 
     const response: ClaimsListResponseDto = {
       data: claims.map((claim) => this.transformClaim(claim, lastLedger)),
       pagination: {
-        page,
-        limit,
+        next_cursor: buildNextCursor(claims, limit, total),
         total,
-        totalPages: Math.ceil(total / limit),
-        hasNext: skip + claims.length < total,
       },
     };
 
@@ -96,42 +98,41 @@ export class ClaimsService {
     walletAddress: string,
     params: ListClaimsParams,
   ): Promise<ClaimsListResponseDto> {
-    const { page, limit } = params;
-    const skip = (page - 1) * limit;
+    const { after } = params;
+    const limit = clampLimit(params.limit);
     const lastLedger = await this.getLastLedger();
 
     const votedClaimIds = await this.prisma.vote.findMany({
       where: { voterAddress: walletAddress.toLowerCase() },
       select: { claimId: true },
     });
-    const votedIds = votedClaimIds.map((vote) => vote.claimId);
+    const votedIds = votedClaimIds.map((v) => v.claimId);
+    const keysetWhere = buildKeysetWhere(after);
 
-    const pendingClaims = await this.prisma.claim.findMany({
-      where: {
-        status: 'PENDING',
-        ...(votedIds.length > 0 ? { id: { notIn: votedIds } } : {}),
-      },
-      include: {
-        votes: {
-          select: { vote: true },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    const baseWhere: Prisma.ClaimWhereInput = {
+      status: 'PENDING',
+      ...(votedIds.length > 0 ? { id: { notIn: votedIds } } : {}),
+    };
 
-    const openClaims = pendingClaims.filter(
+    const [allOpen, page] = await Promise.all([
+      this.prisma.claim.count({ where: baseWhere }),
+      this.prisma.claim.findMany({
+        where: { ...baseWhere, ...(keysetWhere ?? {}) },
+        include: { votes: { select: { vote: true } } },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit,
+      }),
+    ]);
+
+    const openClaims = page.filter(
       (claim) => this.getVotingDeadlineLedger(claim.createdAtLedger) > lastLedger,
     );
-    const paginatedClaims = openClaims.slice(skip, skip + limit);
 
     return {
-      data: paginatedClaims.map((claim) => this.transformClaim(claim, lastLedger)),
+      data: openClaims.map((claim) => this.transformClaim(claim, lastLedger)),
       pagination: {
-        page,
-        limit,
-        total: openClaims.length,
-        totalPages: Math.ceil(openClaims.length / limit),
-        hasNext: skip + paginatedClaims.length < openClaims.length,
+        next_cursor: buildNextCursor(openClaims, limit, allOpen),
+        total: allOpen,
       },
     };
   }

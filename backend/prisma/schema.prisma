@@ -37,6 +37,7 @@ model Claim {
   @@index([status])
   @@index([createdAt])
   @@index([policyId])
+  @@index([createdAt, id]) // keyset pagination: ORDER BY createdAt DESC, id DESC
   @@map("claims")
 }
 
@@ -85,6 +86,7 @@ model Policy {
   @@unique([holderAddress, policyId])
   @@index([holderAddress])
   @@index([isActive])
+  @@index([createdAt, id]) // keyset pagination: ORDER BY createdAt DESC, id DESC
   @@map("policies")
 }
 
