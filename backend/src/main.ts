@@ -67,7 +67,7 @@ async function bootstrap() {
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type", "X-Requested-With"],
+    allowedHeaders: ["Authorization", "Content-Type", "X-Requested-With", "Idempotency-Key"],
     maxAge: 86400,
     preflightContinue: false,
     optionsSuccessStatus: 204,
