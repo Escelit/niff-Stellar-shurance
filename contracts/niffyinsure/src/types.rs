@@ -84,6 +84,18 @@ pub enum VoteOption {
     Reject,
 }
 
+#[contracttype]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TerminationReason {
+    None,
+    VoluntaryCancellation,
+    LapsedNonPayment,
+    UnderwritingVoid,
+    FraudOrMisrepresentation,
+    RegulatoryAction,
+    AdminOverride,
+}
+
 // ── Premium engine structs ────────────────────────────────────────────────────
 
 #[contracttype]
@@ -136,6 +148,9 @@ pub struct Policy {
     /// SEP-41 asset contract used for this policy's premium payment and claim payout.
     /// Must be allowlisted at the time of policy initiation.
     pub asset: Address,
+    pub terminated_at_ledger: u32,
+    pub termination_reason: TerminationReason,
+    pub terminated_by_admin: bool,
 }
 
 /// On-chain claim record.
@@ -149,6 +164,8 @@ pub struct Claim {
     pub policy_id: u32,
     pub claimant: Address,
     pub amount: i128,
+    /// SEP-41 asset contract bound to the policy at filing time.
+    pub asset: Address,
     pub details: String,
     pub image_urls: Vec<String>,
     pub status: ClaimStatus,
@@ -156,6 +173,8 @@ pub struct Claim {
     pub reject_votes: u32,
     /// Ledger sequence at which this claim was filed (voting window anchor).
     pub filed_at: u32,
+    /// Ledger sequence at which payout was executed; None until Paid.
+    pub paid_at: Option<u32>,
 }
 
 #[contracttype]

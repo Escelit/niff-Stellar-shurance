@@ -1,8 +1,13 @@
 ﻿#![no_std]
 
+mod calculator;
 mod claim;
+pub mod events;
+mod ledger;
 mod policy;
+mod policy_lifecycle;
 mod premium;
+mod premium_pure;
 mod storage;
 mod token;
 pub mod types;
@@ -14,7 +19,10 @@ mod oracle;
 #[cfg(feature = "experimental")]
 pub use oracle::*;
 
-use soroban_sdk::{contract, contractimpl, symbol_short, Address, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, String, Vec};
+
+pub use admin::AdminError;
+pub use admin::AdminError as InitError;
 
 #[contract]
 pub struct NiffyInsure;
@@ -24,10 +32,17 @@ impl NiffyInsure {
     /// One-time initialisation: store admin and token contract address, and
     /// seed the default premium table so quote generation is deterministic.
     pub fn initialize(env: Env, admin: Address, token: Address) {
+        if env.storage().instance().has(&storage::DataKey::Admin) {
+            panic_with_error!(&env, AdminError::AlreadyInitialized);
+        }
         storage::set_admin(&env, &admin);
         storage::set_token(&env, &token);
         storage::set_multiplier_table(&env, &premium::default_multiplier_table(&env));
         storage::set_allowed_asset(&env, &token, true);
+        env.events().publish(
+            (soroban_sdk::symbol_short!("init"),),
+            (admin, token),
+        );
     }
 
     /// Pure quote path: reads config and computes premium only.
@@ -101,20 +116,15 @@ impl NiffyInsure {
     }
 
     /// Admin-only: add or remove an asset from the allowlist.
-    /// Emits ("asset", "added") or ("asset", "removed") for indexers.
     pub fn set_allowed_asset(env: Env, asset: Address, allowed: bool) {
-        let admin = storage::get_admin(&env);
-        admin.require_auth();
+        let _admin = admin::require_admin(&env);
         storage::bump_instance(&env);
-        claim::set_allowed_asset(&env, &asset, allowed);
-        env.events().publish(
-            (symbol_short!("asset"), if allowed { symbol_short!("added") } else { symbol_short!("removed") }),
-            asset,
-        );
+        storage::set_allowed_asset(&env, &asset, allowed);
+        events::emit_asset_allowlisted(&env, &asset, allowed);
     }
 
     pub fn is_allowed_asset(env: Env, asset: Address) -> bool {
-        claim::is_allowed_asset(&env, &asset)
+        storage::is_allowed_asset(&env, &asset)
     }
 
     pub fn process_claim(env: Env, claim_id: u64) -> Result<(), validate::Error> {
@@ -125,6 +135,35 @@ impl NiffyInsure {
 
     pub fn get_claim(env: Env, claim_id: u64) -> Result<types::Claim, validate::Error> {
         claim::get_claim(&env, claim_id)
+    }
+
+    pub fn file_claim(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+        amount: i128,
+        details: String,
+        image_urls: Vec<String>,
+    ) -> u64 {
+        holder.require_auth();
+        claim::file_claim(&env, &holder, policy_id, amount, &details, &image_urls)
+            .unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    pub fn vote_on_claim(
+        env: Env,
+        voter: Address,
+        claim_id: u64,
+        vote: types::VoteOption,
+    ) -> types::ClaimStatus {
+        voter.require_auth();
+        claim::vote_on_claim(&env, &voter, claim_id, &vote)
+            .unwrap_or_else(|e| panic_with_error!(&env, e))
+    }
+
+    pub fn finalize_claim(env: Env, claim_id: u64) -> types::ClaimStatus {
+        claim::finalize_claim(&env, claim_id)
+            .unwrap_or_else(|e| panic_with_error!(&env, e))
     }
 
     pub fn get_claim_counter(env: Env) -> u64 {
@@ -178,22 +217,40 @@ impl NiffyInsure {
 
     // ── Admin / pause ────────────────────────────────────────────────────
 
-    pub fn pause(env: Env, admin: Address) {
-        admin.require_auth();
-        let stored_admin = storage::get_admin(&env);
-        assert!(admin == stored_admin, "only admin can pause");
-        storage::set_paused(&env, true);
+    pub fn pause(env: Env) {
+        admin::pause(&env);
     }
 
-    pub fn unpause(env: Env, admin: Address) {
-        admin.require_auth();
-        let stored_admin = storage::get_admin(&env);
-        assert!(admin == stored_admin, "only admin can unpause");
-        storage::set_paused(&env, false);
+    pub fn unpause(env: Env) {
+        admin::unpause(&env);
     }
 
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
+    }
+
+    pub fn propose_admin(env: Env, new_admin: Address) {
+        admin::propose_admin(&env, new_admin);
+    }
+
+    pub fn accept_admin(env: Env) {
+        admin::accept_admin(&env);
+    }
+
+    pub fn cancel_admin(env: Env) {
+        admin::cancel_admin(&env);
+    }
+
+    pub fn set_token(env: Env, new_token: Address) {
+        admin::set_token(&env, new_token);
+    }
+
+    pub fn get_admin(env: Env) -> Address {
+        storage::get_admin(&env)
+    }
+
+    pub fn drain(env: Env, recipient: Address, amount: i128) {
+        admin::drain(&env, recipient, amount);
     }
 
     // ── Test-only helpers ─────────────────────────────────────────────────
@@ -206,7 +263,7 @@ impl NiffyInsure {
         coverage: i128,
         end_ledger: u32,
     ) {
-        use crate::types::{AgeBand, CoverageType, Policy, PolicyType, RegionTier};
+        use crate::types::{Policy, PolicyType, RegionTier, TerminationReason};
         let token = storage::get_token(&env);
         let policy = Policy {
             holder: holder.clone(),
@@ -219,10 +276,11 @@ impl NiffyInsure {
             start_ledger: 1,
             end_ledger,
             asset: token,
+            terminated_at_ledger: 0,
+            termination_reason: TerminationReason::None,
+            terminated_by_admin: false,
         };
-        env.storage()
-            .persistent()
-            .set(&storage::DataKey::Policy(holder.clone(), policy_id), &policy);
+        storage::set_policy(&env, &holder, policy_id, &policy);
         storage::add_voter(&env, &holder);
     }
 
@@ -231,6 +289,3 @@ impl NiffyInsure {
         storage::remove_voter(&env, &holder);
     }
 }
-
-// Re-export error type so tests can reference it without the module path.
-pub use claim::ContractError;

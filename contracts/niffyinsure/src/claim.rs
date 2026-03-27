@@ -10,12 +10,13 @@
 // or audit in-flight claims. Until `file_claim` ships, admins may use
 // `admin_set_open_claim_count` in tests or break-glass ops only.
 use crate::{
+    events,
     ledger,
     storage,
-    types::{Claim, ClaimProcessed, ClaimStatus, VoteOption},
+    types::{Claim, ClaimStatus, VoteOption},
     validate::Error,
 };
-use soroban_sdk::{symbol_short, token, Address, Env, String, Vec};
+use soroban_sdk::{token, Address, Env, String, Vec};
 
 // ── file_claim ────────────────────────────────────────────────────────────────
 
@@ -64,22 +65,23 @@ pub fn file_claim(
         policy_id,
         claimant: holder.clone(),
         amount,
+        asset: policy.asset.clone(),
         details: details.clone(),
         image_urls: image_urls.clone(),
         status: ClaimStatus::Processing,
         approve_votes: 0,
         reject_votes: 0,
         filed_at: now,
+        paid_at: None,
     };
 
     storage::set_claim(env, &claim);
     storage::snapshot_claim_voters(env, claim_id);
     storage::set_last_claim_ledger(env, holder, now);
 
-    env.events().publish(
-        (symbol_short!("clm_filed"), claim_id),
-        holder.clone(),
-    );
+    // Hash the image URLs into a compact u64 for the event payload.
+    let image_hash = hash_image_urls(image_urls);
+    events::emit_claim_filed(env, claim_id, holder, policy_id, amount, image_hash, now);
 
     Ok(claim_id)
 }
@@ -115,7 +117,7 @@ pub fn vote_on_claim(
         return Err(Error::NotEligibleVoter);
     }
 
-    // Duplicate vote check.
+    // Duplicate vote check — before any write.
     if storage::get_vote(env, claim_id, voter).is_some() {
         return Err(Error::DuplicateVote);
     }
@@ -127,25 +129,17 @@ pub fn vote_on_claim(
         VoteOption::Reject => claim.reject_votes += 1,
     }
 
-    env.events().publish(
-(symbol_short!("c_paid"), claim.claim_id),
-        ClaimProcessed {
-            claim_id: claim.claim_id,
-            recipient: claim.claimant.clone(),
-            amount: claim.amount,
-            asset: claim.asset.clone(),
-        },
-    );
+    events::emit_vote_cast(env, claim_id, voter, vote.clone(), claim.approve_votes, claim.reject_votes);
 
     // Auto-finalize on majority.
     let total = snapshot.len();
     let majority = total / 2 + 1;
     if claim.approve_votes >= majority {
         claim.status = ClaimStatus::Approved;
-        // Payout is triggered by admin via process_claim, not here.
-        // Setting Approved makes the claim eligible for process_claim.
+        events::emit_claim_finalized(env, claim_id, ClaimStatus::Approved, claim.approve_votes, claim.reject_votes);
     } else if claim.reject_votes >= majority {
         claim.status = ClaimStatus::Rejected;
+        events::emit_claim_finalized(env, claim_id, ClaimStatus::Rejected, claim.approve_votes, claim.reject_votes);
     }
 
     storage::set_claim(env, &claim);
@@ -177,9 +171,7 @@ pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
         ClaimStatus::Rejected
     };
 
-    if claim.status == ClaimStatus::Approved {
-        // Payout triggered by admin via process_claim.
-    }
+    events::emit_claim_finalized(env, claim_id, claim.status.clone(), claim.approve_votes, claim.reject_votes);
 
     storage::set_claim(env, &claim);
     Ok(claim.status)
@@ -196,13 +188,12 @@ pub fn process_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
     if claim.status != ClaimStatus::Approved {
         return Err(Error::ClaimNotApproved);
     }
-<<<<<<< HEAD
     if claim.amount <= 0 {
         return Err(Error::ClaimAmountZero);
     }
 
     // Verify the claim's asset is still allowlisted (admin may have removed it).
-    if !is_allowed_asset(env, &claim.asset) {
+    if !storage::is_allowed_asset(env, &claim.asset) {
         return Err(Error::InvalidAsset);
     }
 
@@ -214,41 +205,25 @@ pub fn process_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
     }
 
     let token_client = token::Client::new(env, &claim.asset);
-    let treasury = treasury_address(env);
-    check_treasury_balance(&token_client, &treasury, claim.amount)?;
-=======
-
-    payout(env, &claim)?;
-    claim.status = ClaimStatus::Paid;
-    storage::set_claim(env, &claim);
-    Ok(())
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-fn payout(env: &Env, claim: &Claim) -> Result<(), Error> {
-    let token_addr = storage::get_token(env);
-    let token_client = token::Client::new(env, &token_addr);
     let treasury = env.current_contract_address();
 
     if token_client.balance(&treasury) < claim.amount {
         return Err(Error::InsufficientTreasury);
     }
->>>>>>> f31c36f7aaafe0e6592326e70bf1e4291a0fcd67
 
     token_client.transfer(&treasury, &claim.claimant, &claim.amount);
 
-    env.events().publish(
-        (symbol_short!("clm_paid"), claim.claim_id),
-        ClaimProcessed {
-            claim_id: claim.claim_id,
-            recipient: claim.claimant.clone(),
-            amount: claim.amount,
-        },
-    );
+    let now = env.ledger().sequence();
+    claim.status = ClaimStatus::Paid;
+    claim.paid_at = Some(now);
+    storage::set_claim(env, &claim);
+
+    events::emit_claim_paid(env, claim_id, &claim.claimant, claim.amount, &claim.asset);
 
     Ok(())
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn get_claim(env: &Env, claim_id: u64) -> Result<Claim, Error> {
     storage::get_claim(env, claim_id).ok_or(Error::ClaimNotFound)
@@ -260,4 +235,20 @@ pub fn is_allowed_asset(env: &Env, asset: &Address) -> bool {
 
 pub fn set_allowed_asset(env: &Env, asset: &Address, allowed: bool) {
     storage::set_allowed_asset(env, asset, allowed);
+}
+
+/// FNV-1a hash of concatenated IPFS CID bytes, truncated to u64.
+/// Compact enough for event payload; full CIDs are stored off-chain.
+fn hash_image_urls(urls: &Vec<String>) -> u64 {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+    let mut hash: u64 = FNV_OFFSET;
+    for url in urls.iter() {
+        let bytes = url.to_bytes();
+        for i in 0..bytes.len() {
+            hash ^= bytes.get(i).unwrap_or(0) as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
 }

@@ -44,6 +44,13 @@ pub enum Error {
     DuplicateOpenClaim = 33,
     ExcessiveEvidenceBytes = 34,
     PolicyNotFound = 35,
+    RateLimitExceeded = 36,
+    VotingWindowClosed = 37,
+    NotEligibleVoter = 38,
+    VotingWindowStillOpen = 39,
+    CalculatorNotSet = 40,
+    CalculatorCallFailed = 41,
+    CalculatorPaused = 42,
 }
 
 pub fn check_policy(policy: &Policy) -> Result<(), Error> {
