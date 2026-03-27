@@ -1,6 +1,7 @@
 import { IpfsUploadResponse } from '../types/claim';
+import { getConfig } from '@/config/env';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const { apiUrl: API_BASE_URL } = getConfig();
 
 export interface Claim {
   id: number;
@@ -49,13 +50,13 @@ export class ClaimAPI {
     return this.handleResponse<BuildClaimTransactionResponse>(response);
   }
 
-  static async submitTransaction(transactionXdr: string): Promise<any> {
+  static async submitTransaction(transactionXdr: string): Promise<{ claimId: number; transactionHash: string }> {
     const response = await fetch(`${API_BASE_URL}/api/claims/submit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ transactionXdr }),
     });
-    return this.handleResponse<any>(response);
+    return this.handleResponse<{ claimId: number; transactionHash: string }>(response);
   }
 
   static async getClaim(claimId: number): Promise<Claim> {

@@ -1,7 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
+import { z } from "zod";
 import type { TallyUpdate } from "@/components/claims/types";
+
+// Schema to validate untrusted SSE / polling payloads before use
+const TallyUpdateSchema = z.object({
+  claimId: z.string(),
+  approveVotes: z.number().int().nonnegative(),
+  rejectVotes: z.number().int().nonnegative(),
+  quorumThreshold: z.number().int().positive(),
+  deadlineTimestamp: z.string(),
+})
+
+function parseTallyUpdate(raw: unknown): TallyUpdate | null {
+  const result = TallyUpdateSchema.safeParse(raw)
+  return result.success ? (result.data as TallyUpdate) : null
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -125,9 +140,12 @@ export function useRealtimeTallies(
           throw new Error(`Polling failed: ${response.status}`);
         }
 
-        const updates: TallyUpdate[] = await response.json();
+        const updates = (await response.json() as unknown[]);
         if (!unmounted) {
-          updates.forEach((u) => onUpdateRef.current(u));
+          updates.forEach((raw) => {
+            const u = parseTallyUpdate(raw);
+            if (u) onUpdateRef.current(u);
+          });
           failureCount = 0; // reset on success
           scheduleNextPoll(false);
         }
@@ -182,8 +200,9 @@ export function useRealtimeTallies(
         eventSource.onmessage = (event: MessageEvent) => {
           if (unmounted) return;
           try {
-            const update: TallyUpdate = JSON.parse(event.data as string);
-            onUpdateRef.current(update);
+            const raw: unknown = JSON.parse(event.data as string);
+            const update = parseTallyUpdate(raw);
+            if (update) onUpdateRef.current(update);
           } catch {
             // Ignore malformed messages.
           }

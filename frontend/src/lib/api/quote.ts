@@ -1,6 +1,7 @@
 import { QuoteFormData, QuoteResponse, QuoteError as QuoteErrorType } from '@/lib/schemas/quote'
+import { getConfig } from '@/config/env'
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const { apiUrl: API_BASE_URL } = getConfig()
 
 export class QuoteAPI {
   private static async handleResponse<T>(response: Response): Promise<T> {

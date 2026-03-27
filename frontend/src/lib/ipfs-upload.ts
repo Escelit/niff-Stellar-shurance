@@ -1,4 +1,5 @@
 import { IpfsUploadResponse } from '../types/claim';
+import { getConfig } from '@/config/env';
 
 export interface UploadProgress {
   loaded: number;
@@ -8,7 +9,7 @@ export interface UploadProgress {
 
 export type ProgressCallback = (progress: UploadProgress) => void;
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const { apiUrl: API_BASE_URL } = getConfig();
 
 /**
  * Uploads a file to IPFS via the backend with progress tracking and retry logic.

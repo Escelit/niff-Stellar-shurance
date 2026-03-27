@@ -1,6 +1,7 @@
 import { PolicyInitiationData, Transaction, Policy, PolicyError as PolicyErrorType } from '@/lib/schemas/policy'
+import { getConfig } from '@/config/env'
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
+const { apiUrl: API_BASE_URL, explorerBase: EXPLORER_BASE } = getConfig()
 
 export class PolicyAPI {
   private static async handleResponse<T>(response: Response): Promise<T> {
@@ -100,9 +101,6 @@ export function getPolicyErrorMessage(error: PolicyError): string {
   return POLICY_ERROR_MESSAGES[error.code] || error.message || POLICY_ERROR_MESSAGES.UNKNOWN_ERROR
 }
 
-export function getExplorerUrl(transactionHash: string, network: 'TESTNET' | 'PUBLIC' = 'TESTNET'): string {
-  const baseUrl = network === 'TESTNET' 
-    ? 'https://stellar.expert/explorer/testnet/tx'
-    : 'https://stellar.expert/explorer/public/tx'
-  return `${baseUrl}/${transactionHash}`
+export function getExplorerUrl(transactionHash: string): string {
+  return `${EXPLORER_BASE}/${transactionHash}`
 }

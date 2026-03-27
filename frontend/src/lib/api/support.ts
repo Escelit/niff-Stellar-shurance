@@ -1,4 +1,6 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+import { getConfig } from '@/config/env';
+
+const { apiUrl: API_BASE_URL } = getConfig();
 
 export interface TicketPayload {
   email: string;

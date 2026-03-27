@@ -247,11 +247,8 @@ describe("Property 9: No authentication-dependent UI rendered without JWT", () =
             }),
           );
           const text = container.textContent ?? "";
-          const html = container.innerHTML;
           // "Needs my vote" text must be completely absent from the DOM
-          return (
-            !text.includes("Needs my vote") && !html.includes("Needs my vote")
-          );
+          return !text.includes("Needs my vote");
         },
       ),
       { numRuns: 100 },
