@@ -1,4 +1,9 @@
+import createIntlMiddleware from 'next-intl/middleware'
 import { NextRequest, NextResponse } from 'next/server'
+
+import { routing } from './i18n/routing'
+
+const intlMiddleware = createIntlMiddleware(routing)
 
 // ---------------------------------------------------------------------------
 // Per-request nonce injection for Content Security Policy
@@ -73,18 +78,23 @@ function buildCsp(nonce: string): string {
 }
 
 export function middleware(request: NextRequest): NextResponse {
+  // Run next-intl locale routing first (sets locale cookie, redirects if needed)
+  const intlResponse = intlMiddleware(request)
+
   // crypto.randomUUID() is available in the Edge runtime
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64')
 
-  const response = NextResponse.next({
+  const response = intlResponse ?? NextResponse.next({
     request: {
       headers: new Headers({
         ...Object.fromEntries(request.headers),
-        // Forward nonce to the layout so it can be placed on <Script> tags
         'x-nonce': nonce,
       }),
     },
   })
+
+  // Inject nonce into request headers so layout.tsx can read it
+  response.headers.set('x-nonce', nonce)
 
   response.headers.set(CSP_HEADER, buildCsp(nonce))
   response.headers.set('X-Content-Type-Options', 'nosniff')
