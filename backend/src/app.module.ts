@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TerminusModule } from '@nestjs/terminus';
 import { ThrottlerModule, ThrottlerStorage } from '@nestjs/throttler';
@@ -18,11 +18,12 @@ import { PolicyModule } from './policy/policy.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { TxModule } from './tx/tx.module';
 import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
+import { MetricsModule } from './metrics/metrics.module';
+import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
+import { AppLoggerService } from './common/logger/app-logger.service';
 import { OracleHooksController } from './experimental/oracle-hooks.controller';
 import { BetaCalculatorsController } from './experimental/beta-calculators.controller';
-import { WalletAwareThrottlerGuard } from './common/guards/throttler.guard';
-import { RedisThrottlerStorage } from './common/guards/throttler-redis.storage';
-import { RedisService } from './cache/redis.service';
+import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
 
 @Module({
   imports: [
@@ -60,12 +61,13 @@ import { RedisService } from './cache/redis.service';
     NotificationsModule,
     TxModule,
     FeatureFlagsModule,
+    MetricsModule,
   ],
   controllers: [OracleHooksController, BetaCalculatorsController],
-  providers: [
-    // Apply WalletAwareThrottlerGuard globally — individual routes can
-    // override limits with @Throttle({ default: { limit, ttl } })
-    { provide: APP_GUARD, useClass: WalletAwareThrottlerGuard },
-  ],
+  providers: [RequestContextMiddleware, AppLoggerService],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(RequestContextMiddleware).forRoutes('*');
+  }
+}
