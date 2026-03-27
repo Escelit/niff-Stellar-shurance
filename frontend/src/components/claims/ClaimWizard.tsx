@@ -1,15 +1,19 @@
 'use client';
 
-import React, { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { Stepper, StepContent, Card, CardHeader, CardTitle, CardDescription, CardContent, Button, useToast } from '@/components/ui';
-import { AmountStep } from './steps/AmountStep';
-import { NarrativeStep } from './steps/NarrativeStep';
-import { EvidenceStep } from './steps/EvidenceStep';
-import { ReviewStep } from './steps/ReviewStep';
-import { ClaimAPI } from '@/lib/api/claim';
-import { useWallet } from '@/hooks/use-wallet'; // Assuming this exists based on common patterns
 import { Loader2, ArrowLeft, ArrowRight, CheckCircle } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import React, { useState } from 'react';
+
+import { Stepper, StepContent, Card, CardHeader, CardTitle, CardDescription, CardContent, Button, useToast } from '@/components/ui';
+import { useWallet } from '@/hooks/use-wallet'; // Assuming this exists based on common patterns
+import { ClaimAPI } from '@/lib/api/claim';
+
+import { AmountStep } from './steps/AmountStep';
+import { EvidenceStep } from './steps/EvidenceStep';
+import { NarrativeStep } from './steps/NarrativeStep';
+import { ReviewStep } from './steps/ReviewStep';
+
+
 
 interface ClaimWizardProps {
   policyId: string;

@@ -1,20 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { PolicyInitiationSchema, PolicyInitiationData, Transaction, Policy } from '@/lib/schemas/policy'
-import { PolicyAPI, PolicyError, getPolicyErrorMessage, getExplorerUrl } from '@/lib/api/policy'
-import { QuoteAPI, QuoteError, getQuoteErrorMessage } from '@/lib/api/quote'
-import type { QuoteResponse } from '@/lib/schemas/quote'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { Card, CardContent } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Stepper, StepContent, type Step } from '@/components/ui/stepper'
-import { useToast } from '@/components/ui/use-toast'
 import { 
   Loader2, 
   AlertCircle, 
@@ -25,6 +11,22 @@ import {
   Shield
 } from 'lucide-react'
 import { useSearchParams } from 'next/navigation'
+import { useState, useEffect } from 'react'
+import { useForm } from 'react-hook-form'
+
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Stepper, StepContent, type Step } from '@/components/ui/stepper'
+import { useToast } from '@/components/ui/use-toast'
+import { PolicyAPI, PolicyError, getPolicyErrorMessage, getExplorerUrl } from '@/lib/api/policy'
+import { QuoteAPI, QuoteError, getQuoteErrorMessage } from '@/lib/api/quote'
+import { PolicyInitiationSchema, PolicyInitiationData, Transaction, Policy } from '@/lib/schemas/policy'
+import type { QuoteResponse } from '@/lib/schemas/quote'
+
 
 interface PolicyInitiationProps {
   quoteId?: string

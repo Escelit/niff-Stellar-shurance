@@ -1,6 +1,7 @@
-import * as React from 'react'
-import { cn } from '@/lib/utils'
 import { Check, ChevronRight } from 'lucide-react'
+import * as React from 'react'
+
+import { cn } from '@/lib/utils'
 
 interface Step {
   id: string

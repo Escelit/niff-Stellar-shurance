@@ -1,4 +1,5 @@
 import dynamic from 'next/dynamic'
+
 import { Hero } from '@/components/landing/hero'
 import { Skeleton } from '@/components/ui/skeleton'
 
