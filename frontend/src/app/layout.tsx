@@ -81,8 +81,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       </head>
       <body className="font-sans antialiased">
         <ThemeProvider defaultTheme="system" storageKey="niffyinsur-theme">
-          {children}
-          <Toaster />
+          <WalletProvider>
+            {children}
+            <NetworkMismatchModal />
+            <Toaster />
+          </WalletProvider>
         </ThemeProvider>
       </body>
     </html>
