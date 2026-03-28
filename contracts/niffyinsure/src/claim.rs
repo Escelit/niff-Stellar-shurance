@@ -218,6 +218,11 @@ pub fn file_claim(
 
     crate::validate::check_claim_fields(env, amount, policy.coverage, details, image_urls)?;
 
+    let duration = storage::get_voting_duration_ledgers(env);
+    let voting_deadline_ledger = now
+        .checked_add(duration)
+        .ok_or(Error::Overflow)?;
+
     let claim_id = storage::next_claim_id(env);
     let mut status_history: Vec<ClaimStatusHistoryEntry> = Vec::new(env);
     push_status_transition(&mut status_history, ClaimStatus::Processing, now);
@@ -230,7 +235,7 @@ pub fn file_claim(
         details: details.clone(),
         image_urls: image_urls.clone(),
         status: ClaimStatus::Processing,
-        voting_deadline_ledger: now.saturating_add(ledger::VOTE_WINDOW_LEDGERS),
+        voting_deadline_ledger,
         approve_votes: 0,
         reject_votes: 0,
         filed_at: now,
@@ -260,7 +265,7 @@ pub fn file_claim(
 
 /// Cast a vote on a pending claim.
 ///
-/// Window check: `now < filed_at + VOTE_WINDOW_LEDGERS` (via `ledger::is_vote_open`).
+/// Window check: `now <= claim.voting_deadline_ledger` (inclusive; see `ledger::is_claim_voting_open`).
 /// Returns the updated `ClaimStatus` after tallying.
 pub fn vote_on_claim(
     env: &Env,
@@ -277,9 +282,9 @@ pub fn vote_on_claim(
         return Err(Error::ClaimAlreadyTerminal);
     }
 
-    // Voting window check.
+    // Voting window: use per-claim deadline frozen at filing (not current admin config).
     let now = env.ledger().sequence();
-    if !ledger::is_vote_open(now, claim.filed_at, ledger::VOTE_WINDOW_LEDGERS) {
+    if !ledger::is_claim_voting_open(now, claim.voting_deadline_ledger) {
         return Err(Error::VotingWindowClosed);
     }
 
@@ -341,7 +346,7 @@ pub fn vote_on_claim(
 
 /// Finalize a claim after the voting deadline has passed.
 ///
-/// Window check: `now >= filed_at + VOTE_WINDOW_LEDGERS` (via `ledger::is_vote_deadline_passed`).
+/// Window check: `now > claim.voting_deadline_ledger` (see `ledger::is_claim_past_voting_deadline`).
 /// Plurality wins; tie resolves to Rejected.
 pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
     // Check pause: finalization is blocked if claims_paused is true
@@ -354,7 +359,7 @@ pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
     }
 
     let now = env.ledger().sequence();
-    if !ledger::is_vote_deadline_passed(now, claim.filed_at, ledger::VOTE_WINDOW_LEDGERS) {
+    if !ledger::is_claim_past_voting_deadline(now, claim.voting_deadline_ledger) {
         return Err(Error::VotingWindowStillOpen);
     }
 
