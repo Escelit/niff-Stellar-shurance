@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SorobanService } from '../rpc/soroban.service';
+import { parseEvent } from '../events/events.schema';
 import { rpc as SorobanRpc, scValToNative } from '@stellar/stellar-sdk';
 
 type IndexerTx = Prisma.TransactionClient;
@@ -219,38 +220,26 @@ export class IndexerService {
     });
   }
 
+  /**
+   * On-chain `ClaimFiled` carries claim_id + holder in topics and `evidence_hashes` in the value.
+   * Full claim rows need policy_id / amount / URLs from `get_claim` — backfill TBD.
+   */
   private async handleClaimFiled(tx: IndexerTx, data: EventPayload, event: SorobanEvent) {
-    const claimId = getNumberValue(data.claim_id);
-    const id = `${getStringValue(data.claimant)}:${getNumberValue(data.policy_id)}`;
-
-  private async handleClaimFiled(tx: any, data: ClaimFiledEvent, ids: unknown[], event: any) {
-    // ids[0] = claim_id (u64), ids[1] = holder (Address)
-    const claimId = Number(ids[0]);
-    const holder = String(ids[1]);
-    const policyDbId = `${holder}:${data.policy_id}`;
-    await tx.claim.upsert({
-      where: { id: claimId },
-      create: {
-        id: claimId,
-        policyId: id,
-        creatorAddress: getStringValue(data.claimant),
-        amount: getStringValue(data.amount),
-        asset: getStringValue(data.asset),
-        description: getStringValue(data.details),
-        imageUrls: getStringArray(data.image_urls),
-        status: 'PENDING',
-        approveVotes: 0,
-        rejectVotes: 0,
-        createdAtLedger: event.ledger,
-        txHash: event.txHash,
-      },
-      update: {
-        // Already exists from previous vote or processing (shouldn't happen with correct order but handle it)
-        amount: getStringValue(data.amount),
-        description: getStringValue(data.details),
-        imageUrls: getStringArray(data.image_urls),
-      }
-    });
+    const hashesRaw = data.evidence_hashes;
+    const imageUrls =
+      Array.isArray(hashesRaw) && hashesRaw.length > 0
+        ? hashesRaw.map((h) =>
+            h instanceof Uint8Array
+              ? `0x${Buffer.from(h).toString('hex')}`
+              : getStringValue(h),
+          )
+        : [];
+    void tx;
+    void imageUrls;
+    void event;
+    this.logger.debug(
+      `ClaimFiled observed (evidence hash commitments: ${imageUrls.length}); DB upsert deferred until indexer reads get_claim`,
+    );
   }
 
   private async handleVoteCast(
@@ -261,7 +250,8 @@ export class IndexerService {
   ) {
     const claimId = Number(topics[1]);
     const voter = topics[2]?.toString();
-    const option = getStringValue(data); // VoteOption enum: "Approve" or "Reject"
+    const payload = data as EventPayload;
+    const option = getStringValue(payload.vote ?? data);
 
     if (!voter) {
       this.logger.warn(`Skipping vote event for claim ${claimId}: missing voter topic`);
@@ -283,19 +273,9 @@ export class IndexerService {
     });
     await tx.claim.update({
       where: { id: claimId },
-      data: { approveVotes: data.approve_votes, rejectVotes: data.reject_votes },
-    });
-  }
-
-  private async handleClaimFinalized(tx: any, data: ClaimFinalizedEvent, ids: unknown[]) {
-    const claimId = Number(ids[0]);
-    await tx.claim.update({
-      where: { id: claimId },
       data: {
-        status: data.status === 'Approved' ? 'APPROVED' : 'REJECTED',
-        approveVotes: data.approve_votes,
-        rejectVotes: data.reject_votes,
-        updatedAtLedger: data.at_ledger,
+        approveVotes: getNumberValue(payload.approve_votes),
+        rejectVotes: getNumberValue(payload.reject_votes),
       },
     });
   }

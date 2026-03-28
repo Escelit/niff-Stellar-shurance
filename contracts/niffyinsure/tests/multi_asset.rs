@@ -9,6 +9,8 @@
 
 #![cfg(test)]
 
+mod common;
+
 use niffyinsure::NiffyInsureClient;
 use soroban_sdk::{testutils::Address as _, token, Address, Env};
 
@@ -255,7 +257,7 @@ fn claim_payout_uses_policy_bound_asset() {
         amount: 5_000_000i128,
         asset: t.token_a.clone(),
         details: SorobanString::from_str(&t.env, "fire damage"),
-        image_urls: Vec::new(&t.env),
+        evidence: common::empty_evidence(&t.env),
         status: ClaimStatus::Approved,
         voting_deadline_ledger: 1_000,
         approve_votes: 3,
@@ -315,7 +317,7 @@ fn claim_with_disallowed_bound_asset_is_rejected() {
         amount: 5_000_000i128,
         asset: t.token_a.clone(),
         details: SorobanString::from_str(&t.env, "mismatch test"),
-        image_urls: Vec::new(&t.env),
+        evidence: common::empty_evidence(&t.env),
         status: ClaimStatus::Approved,
         voting_deadline_ledger: 1_000,
         approve_votes: 3,

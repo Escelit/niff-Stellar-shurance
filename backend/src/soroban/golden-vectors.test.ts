@@ -21,6 +21,7 @@ import {
   Address,
 } from '@stellar/stellar-sdk';
 import * as vectors from './golden-vectors.json';
+import { claimEvidenceVecToScVal } from './file-claim-evidence';
 
 // ── Helpers that mirror soroban.client.ts ─────────────────────────────────────
 
@@ -67,18 +68,20 @@ function buildInitiatePolicyArgs(inputs: Record<string, unknown>): xdr.ScVal[] {
 
 /**
  * Mirrors `file_claim` argument list.
- * Contract signature: holder, policy_id, amount, details, image_urls
+ * Contract signature: holder, policy_id, amount, details, evidence
  */
 function buildFileClaimArgs(inputs: Record<string, unknown>): xdr.ScVal[] {
-  const imageUrls = (inputs['image_urls'] as string[]).map((u) =>
-    nativeToScVal(u, { type: 'string' }),
-  );
+  const raw = inputs['evidence'] as { url: string; content_sha256_hex: string }[];
+  const evidence = raw.map((e) => ({
+    url: e.url,
+    contentSha256Hex: e.content_sha256_hex,
+  }));
   return [
     new Address(inputs['holder'] as string).toScVal(),
     nativeToScVal(inputs['policy_id'] as number, { type: 'u32' }),
     nativeToScVal(BigInt(inputs['amount'] as string), { type: 'i128' }),
     nativeToScVal(inputs['details'] as string, { type: 'string' }),
-    xdr.ScVal.scvVec(imageUrls),
+    claimEvidenceVecToScVal(evidence),
   ];
 }
 

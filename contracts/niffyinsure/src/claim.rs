@@ -1,7 +1,7 @@
 // Claim lifecycle and DAO voting will be implemented here.
 //
 // Planned public functions:
-//   file_claim(env, policy_id, amount, details, image_urls)
+//   file_claim(env, policy_id, amount, details, evidence)
 //   vote_on_claim(env, voter, claim_id, vote)
 //
 // Open claim accounting: `storage::OpenClaimCount(holder, policy_id)` must be
@@ -39,7 +39,7 @@
 // extensions and remain readable indefinitely via `get_claim`. The `details`
 // field holds a brief description (≤ 256 chars); full allegation narratives
 // must NOT be stored on-chain — use IPFS/off-chain storage and reference via
-// `image_urls` or an off-chain indexer.
+// `evidence` URLs or an off-chain indexer.
 //
 // ── Appeal window interaction ─────────────────────────────────────────────────
 //
@@ -68,12 +68,12 @@
 use crate::{
     ledger, storage,
     types::{
-        Claim, ClaimProcessed, ClaimStatus, ClaimStatusHistoryEntry, TerminationReason, VoteOption,
-        CLAIM_STATUS_HISTORY_MAX, STRIKE_DEACTIVATION_THRESHOLD,
+        Claim, ClaimEvidenceEntry, ClaimProcessed, ClaimStatus, ClaimStatusHistoryEntry,
+        TerminationReason, VoteOption, CLAIM_STATUS_HISTORY_MAX, STRIKE_DEACTIVATION_THRESHOLD,
     },
     validate::Error,
 };
-use soroban_sdk::{contractevent, Address, Env, String, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Vec};
 
 /// Append `status` at `ledger`, then drop oldest entries if over [`CLAIM_STATUS_HISTORY_MAX`].
 /// Never fails — transitions must not revert because the log is full.
@@ -96,7 +96,8 @@ struct ClaimFiled {
     #[topic]
     pub claim_id: u64,
     pub holder: Address,
-    pub image_hash: u64,
+    /// SHA-256 commitments (32 bytes each), same order as `Claim::evidence`.
+    pub evidence_hashes: Vec<BytesN<32>>,
 }
 
 /// Emitted as the authoritative rejection signal. Indexers must consume this
@@ -186,7 +187,7 @@ pub fn file_claim(
     policy_id: u32,
     amount: i128,
     details: &String,
-    image_urls: &Vec<String>,
+    evidence: &Vec<ClaimEvidenceEntry>,
 ) -> Result<u64, Error> {
     // Check pause: claims are blocked if claims_paused is true
     storage::assert_claims_not_paused(env);
@@ -217,7 +218,7 @@ pub fn file_claim(
         }
     }
 
-    crate::validate::check_claim_fields(env, amount, policy.coverage, details, image_urls)?;
+    crate::validate::check_claim_fields(env, amount, policy.coverage, details, evidence)?;
 
     let duration = storage::get_voting_duration_ledgers(env);
     let voting_deadline_ledger = now
@@ -234,7 +235,7 @@ pub fn file_claim(
         amount,
         asset: policy.asset.clone(),
         details: details.clone(),
-        image_urls: image_urls.clone(),
+        evidence: evidence.clone(),
         status: ClaimStatus::Processing,
         voting_deadline_ledger,
         approve_votes: 0,
@@ -253,10 +254,15 @@ pub fn file_claim(
     storage::snapshot_claim_voters(env, claim_id);
     storage::set_last_claim_ledger(env, holder, now);
 
+    let mut evidence_hashes: Vec<BytesN<32>> = Vec::new(env);
+    for e in evidence.iter() {
+        evidence_hashes.push_back(e.hash.clone());
+    }
+
     ClaimFiled {
         claim_id,
         holder: holder.clone(),
-        image_hash: hash_image_urls(image_urls),
+        evidence_hashes,
     }
     .publish(env);
 
@@ -568,22 +574,6 @@ pub fn get_claim_history(env: &Env, claim_id: u64) -> Result<Vec<ClaimStatusHist
 
 pub fn set_allowed_asset(env: &Env, asset: &Address, allowed: bool) {
     storage::set_allowed_asset(env, asset, allowed);
-}
-
-/// FNV-1a hash of concatenated IPFS CID bytes, truncated to u64.
-/// Compact enough for event payload; full CIDs are stored off-chain.
-fn hash_image_urls(urls: &Vec<String>) -> u64 {
-    const FNV_OFFSET: u64 = 14695981039346656037;
-    const FNV_PRIME: u64 = 1099511628211;
-    let mut hash: u64 = FNV_OFFSET;
-    for url in urls.iter() {
-        let bytes = url.to_bytes();
-        for i in 0..bytes.len() {
-            hash ^= bytes.get(i).unwrap_or(0) as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
-    }
-    hash
 }
 
 #[cfg(test)]

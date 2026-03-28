@@ -183,10 +183,10 @@ impl NiffyInsure {
         policy_id: u32,
         amount: i128,
         details: soroban_sdk::String,
-        image_urls: Vec<soroban_sdk::String>,
+        evidence: Vec<types::ClaimEvidenceEntry>,
     ) -> Result<u64, validate::Error> {
         holder.require_auth();
-        claim::file_claim(&env, &holder, policy_id, amount, &details, &image_urls)
+        claim::file_claim(&env, &holder, policy_id, amount, &details, &evidence)
     }
 
     pub fn vote_on_claim(

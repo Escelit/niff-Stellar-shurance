@@ -169,7 +169,8 @@
                 },
                 {
                   "address": "CCABDO7UZXYE4W6GVSEGSNNZTKSLFQGKXXQTH6OX7M7GKZ4Z6CUJNGZN"
-                }
+                },
+                "void"
               ]
             }
           },
@@ -488,18 +489,18 @@
                     },
                     {
                       "key": {
-                        "symbol": "filed_at"
+                        "symbol": "evidence"
                       },
                       "val": {
-                        "u32": 300
+                        "vec": []
                       }
                     },
                     {
                       "key": {
-                        "symbol": "image_urls"
+                        "symbol": "filed_at"
                       },
                       "val": {
-                        "vec": []
+                        "u32": 300
                       }
                     },
                     {
@@ -781,6 +782,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "beneficiary"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "coverage"
                       },
                       "val": {
@@ -957,6 +964,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "beneficiary"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "coverage"
                       },
                       "val": {
@@ -1130,6 +1143,12 @@
                       "val": {
                         "address": "CCABDO7UZXYE4W6GVSEGSNNZTKSLFQGKXXQTH6OX7M7GKZ4Z6CUJNGZN"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "beneficiary"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -1710,6 +1729,18 @@
                         },
                         "val": {
                           "address": "CCABDO7UZXYE4W6GVSEGSNNZTKSLFQGKXXQTH6OX7M7GKZ4Z6CUJNGZN"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "VoteDurLedgers"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 120960
                         }
                       },
                       {

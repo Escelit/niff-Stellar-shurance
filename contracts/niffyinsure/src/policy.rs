@@ -176,7 +176,9 @@ pub fn map_quote_error(env: &Env, err: Error) -> QuoteFailure {
         Error::ClaimAmountZero => "claim amount must be greater than zero",
         Error::ClaimExceedsCoverage => "claim amount exceeds policy coverage",
         Error::PolicyNotFound => "policy not found",
-        Error::ExcessiveEvidenceBytes => "claim evidence payload exceeds the configured size limit",
+        Error::ExcessiveEvidenceBytes => {
+            "claim evidence rejected: invalid commitment (e.g. all-zero SHA-256) or payload over limit"
+        }
         Error::DetailsTooLong => "claim details exceed maximum length",
         Error::TooManyImageUrls => "too many image URLs supplied",
         Error::ImageUrlTooLong => "image URL exceeds maximum length",

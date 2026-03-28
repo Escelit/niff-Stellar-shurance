@@ -2,6 +2,8 @@
 
 //! Integration tests for on-chain `Claim.status_history` and `get_claim_history`.
 
+mod common;
+
 use niffyinsure::{
     types::{
         AgeBand, ClaimStatus, CoverageTier, PolicyType, RegionTier, VoteOption,
@@ -11,7 +13,7 @@ use niffyinsure::{
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, vec, Address, Env, String,
+    token, Address, Env, String,
 };
 
 const INITIAL_LEDGER: u32 = 300;
@@ -75,8 +77,8 @@ fn status_history_order_matches_transitions_and_get_claim_history() {
     );
 
     let details = String::from_str(&env, "timeline test");
-    let urls = vec![&env];
-    let claim_id = client.file_claim(&holder, &policy.policy_id, &50_000, &details, &urls);
+    let ev = common::empty_evidence(&env);
+    let claim_id = client.file_claim(&holder, &policy.policy_id, &50_000, &details, &ev);
 
     let claim = client.get_claim(&claim_id);
     assert_eq!(claim.status_history.len(), 1u32);
@@ -153,8 +155,8 @@ fn status_history_finalize_reject_sequence() {
     );
 
     let details = String::from_str(&env, "reject path");
-    let urls = vec![&env];
-    let claim_id = client.file_claim(&holder, &policy.policy_id, &50_000, &details, &urls);
+    let ev = common::empty_evidence(&env);
+    let claim_id = client.file_claim(&holder, &policy.policy_id, &50_000, &details, &ev);
 
     // Split vote — no majority until deadline
     client.vote_on_claim(&voter1, &claim_id, &VoteOption::Approve);

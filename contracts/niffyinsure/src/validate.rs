@@ -1,8 +1,8 @@
-use soroban_sdk::{contracterror, Env, String, Vec};
+use soroban_sdk::{contracterror, BytesN, Env, String, Vec};
 
 use crate::types::{
-    Claim, MultiplierTable, Policy, RiskInput, DETAILS_MAX_LEN, IMAGE_URLS_MAX, IMAGE_URL_MAX_LEN,
-    REASON_MAX_LEN, SAFETY_SCORE_MAX,
+    Claim, ClaimEvidenceEntry, MultiplierTable, Policy, RiskInput, DETAILS_MAX_LEN, IMAGE_URLS_MAX,
+    IMAGE_URL_MAX_LEN, REASON_MAX_LEN, SAFETY_SCORE_MAX,
 };
 #[cfg(feature = "experimental")]
 use crate::types::{OracleSource, OracleTrigger, TriggerEventType, TriggerStatus};
@@ -94,12 +94,21 @@ pub fn check_policy_active(policy: &Policy, current_ledger: u32) -> Result<(), E
     Ok(())
 }
 
+fn sha256_commitment_non_zero(h: &BytesN<32>) -> bool {
+    for i in 0u32..32u32 {
+        if h.get(i).unwrap_or(0) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn check_claim_fields(
     env: &Env,
     amount: i128,
     coverage: i128,
     details: &String,
-    image_urls: &Vec<String>,
+    evidence: &Vec<ClaimEvidenceEntry>,
 ) -> Result<(), Error> {
     if amount <= 0 {
         return Err(Error::ClaimAmountZero);
@@ -110,12 +119,16 @@ pub fn check_claim_fields(
     if details.len() > DETAILS_MAX_LEN {
         return Err(Error::DetailsTooLong);
     }
-    if image_urls.len() > IMAGE_URLS_MAX {
+    if evidence.len() > IMAGE_URLS_MAX {
         return Err(Error::TooManyImageUrls);
     }
-    for url in image_urls.iter() {
-        if url.len() > IMAGE_URL_MAX_LEN {
+    for entry in evidence.iter() {
+        if entry.url.len() > IMAGE_URL_MAX_LEN {
             return Err(Error::ImageUrlTooLong);
+        }
+        if !sha256_commitment_non_zero(&entry.hash) {
+            // `ExcessiveEvidenceBytes` is the reserved evidence bucket (no dedicated enum slot left).
+            return Err(Error::ExcessiveEvidenceBytes);
         }
     }
     let _ = env;

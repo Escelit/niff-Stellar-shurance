@@ -1,8 +1,9 @@
-use soroban_sdk::{contractevent, contracttype, Address, Bytes, Map, String, Vec};
+use soroban_sdk::{contractevent, contracttype, Address, Bytes, BytesN, Map, String, Vec};
 
 // ── Field size limits ─────────────────────────────────────────────────────────
 pub const DETAILS_MAX_LEN: u32 = 256;
 pub const IMAGE_URL_MAX_LEN: u32 = 128;
+/// Max evidence attachments per claim (URL + SHA-256 commitment each).
 pub const IMAGE_URLS_MAX: u32 = 5;
 pub const REASON_MAX_LEN: u32 = 128;
 pub const SAFETY_SCORE_MAX: u32 = 100;
@@ -233,7 +234,7 @@ pub struct PolicyLookupKey {
 
 /// Lightweight policy summary returned by `list_policies`.
 ///
-/// Omits large or rarely-needed fields (`details`, `image_urls`, etc.) to keep
+/// Omits large or rarely-needed fields (`details`, `evidence`, etc.) to keep
 /// per-page byte cost predictable.  Callers that need the full record should
 /// follow up with `get_policy(holder, policy_id)`.
 #[contracttype]
@@ -248,7 +249,7 @@ pub struct PolicySummary {
 
 /// Lightweight claim summary returned by `list_claims`.
 ///
-/// Omits `details` and `image_urls` to keep per-page byte cost predictable.
+/// Omits `details` and `evidence` to keep per-page byte cost predictable.
 /// Callers that need the full record should follow up with `get_claim(claim_id)`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -260,6 +261,24 @@ pub struct ClaimSummary {
     pub filed_at: u32,
     /// Same field as `Claim::voting_deadline_ledger` — authoritative for UI / indexers.
     pub voting_deadline_ledger: u32,
+}
+
+// ── Claim evidence ───────────────────────────────────────────────────────────
+
+/// One evidence attachment: where to fetch bytes off-chain and a **SHA-256 content hash**
+/// the submitter asserts matches those bytes at filing time.
+///
+/// # On-chain limitation
+///
+/// This contract **does not** fetch `url` or recompute SHA-256 on-chain. It only stores
+/// the commitment. Off-chain services (NestJS IPFS proxy, verification workers) must
+/// download content and compare digests to `hash` for integrity.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimEvidenceEntry {
+    pub url: String,
+    /// SHA-256 digest (32 bytes). Filing rejects the all-zero digest.
+    pub hash: BytesN<32>,
 }
 
 // ── Premium engine structs ────────────────────────────────────────────────────
@@ -362,7 +381,8 @@ pub struct Claim {
     /// SEP-41 asset contract bound to the policy at filing time.
     pub asset: Address,
     pub details: String,
-    pub image_urls: Vec<String>,
+    /// Evidence attachments (URL + SHA-256 content commitment per entry).
+    pub evidence: Vec<ClaimEvidenceEntry>,
     pub status: ClaimStatus,
     pub voting_deadline_ledger: u32,
     pub approve_votes: u32,

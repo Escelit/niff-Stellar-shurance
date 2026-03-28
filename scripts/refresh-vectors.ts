@@ -115,27 +115,47 @@ function makeInitiatePolicyVector(
 // ── file_claim vector ─────────────────────────────────────────────────────────
 
 function makeFileClaimVector() {
-  const imageUrls = ['ipfs://QmXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'];
+  const hash = Buffer.alloc(32);
+  hash[0] = 1;
+  const entry = xdr.ScVal.scvMap([
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('url'),
+      val: nativeToScVal('ipfs://QmXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX', {
+        type: 'string',
+      }),
+    }),
+    new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol('hash'),
+      val: xdr.ScVal.scvBytes(hash),
+    }),
+  ]);
+  const evidenceVec = xdr.ScVal.scvVec([entry]);
   const vals = [
     new Address(PLACEHOLDER_ACCOUNT).toScVal(),
     nativeToScVal(0, { type: 'u32' }),
     nativeToScVal(BigInt('1000000000'), { type: 'i128' }),
     nativeToScVal('Vehicle damage', { type: 'string' }),
-    xdr.ScVal.scvVec(imageUrls.map((u) => nativeToScVal(u, { type: 'string' }))),
+    evidenceVec,
   ];
-  const names = ['holder','policy_id','amount','details','image_urls'];
+  const names = ['holder', 'policy_id', 'amount', 'details', 'evidence'];
   return {
     id: 'file_claim__standard',
     function: 'file_claim',
-    description: 'Standard claim filing with one image URL',
+    description: 'Standard claim filing with one evidence URL + SHA-256 commitment',
     args: buildArgRecords(names, vals),
     argCount: vals.length,
     inputs: {
-      holder:     PLACEHOLDER_ACCOUNT,
-      policy_id:  0,
-      amount:     '1000000000',
-      details:    'Vehicle damage',
-      image_urls: imageUrls,
+      holder: PLACEHOLDER_ACCOUNT,
+      policy_id: 0,
+      amount: '1000000000',
+      details: 'Vehicle damage',
+      evidence: [
+        {
+          url: 'ipfs://QmXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+          content_sha256_hex:
+            '0100000000000000000000000000000000000000000000000000000000000000',
+        },
+      ],
     },
   };
 }

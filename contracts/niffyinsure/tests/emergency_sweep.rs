@@ -12,6 +12,8 @@
 
 #![cfg(test)]
 
+mod common;
+
 use niffyinsure::{types::ClaimStatus, NiffyInsureClient};
 use soroban_sdk::{
     testutils::{Address as _, Events},
@@ -207,7 +209,7 @@ fn sweep_reverts_when_violating_protected_balance() {
         asset: token.clone(),
         status: ClaimStatus::Approved,
         details: String::from_str(&env, "Test claim"),
-        image_urls: soroban_sdk::vec![&env],
+        evidence: common::empty_evidence(&env),
         voting_deadline_ledger: 200,
         approve_votes: 10,
         reject_votes: 0,
@@ -271,7 +273,7 @@ fn sweep_ignores_paid_claims_in_protected_balance() {
         asset: token.clone(),
         status: ClaimStatus::Paid,
         details: String::from_str(&env, "Paid claim"),
-        image_urls: soroban_sdk::vec![&env],
+        evidence: common::empty_evidence(&env),
         voting_deadline_ledger: 200,
         approve_votes: 10,
         reject_votes: 0,
