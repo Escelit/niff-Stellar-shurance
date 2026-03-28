@@ -25,6 +25,7 @@ import { FeatureFlagDto } from './dto/feature-flag.dto';
 import { SetRateLimitDto, EnableOverrideDto } from './dto/rate-limit.dto';
 import { PrivacyService, PrivacyRequestType } from '../maintenance/privacy.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
+import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
 
 class PrivacyRequestDto {
   @IsString() subjectWalletAddress!: string;
@@ -48,6 +49,7 @@ export class AdminController {
     private readonly auditService: AuditService,
     private readonly privacyService: PrivacyService,
     private readonly rateLimitService: RateLimitService,
+    private readonly solvencyMonitoringService: SolvencyMonitoringService,
   ) {}
 
   /**
@@ -95,6 +97,19 @@ export class AdminController {
   @ApiOperation({ summary: 'List all feature flags' })
   async listFeatureFlags() {
     return this.adminService.getFeatureFlags();
+  }
+
+  /**
+   * GET /admin/solvency
+   *
+   * Latest snapshot from Redis only (no live Soroban call). Populated by the
+   * scheduled solvency job; may be null before the first successful run.
+   */
+  @Get('solvency')
+  @ApiOperation({ summary: 'Cached solvency snapshot for dashboard (Redis only)' })
+  async getSolvencySnapshot() {
+    const snapshot = await this.solvencyMonitoringService.getLatestSnapshot();
+    return { snapshot };
   }
 
   /**

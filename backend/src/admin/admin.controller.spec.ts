@@ -6,9 +6,20 @@ import { AdminService } from './admin.service';
 import { AuditService } from './audit.service';
 import { AdminRoleGuard } from './guards/admin-role.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PrivacyService } from '../maintenance/privacy.service';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
+import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
 
 const mockAdminService = { enqueueReindex: jest.fn(), setFeatureFlag: jest.fn(), getFeatureFlags: jest.fn() };
 const mockAuditService = { write: jest.fn(), findAll: jest.fn() };
+const mockPrivacyService = { handleRequest: jest.fn(), listRequests: jest.fn() };
+const mockRateLimitService = {
+  setLimit: jest.fn(),
+  getCounterState: jest.fn(),
+  enableOverride: jest.fn(),
+  disableOverride: jest.fn(),
+};
+const mockSolvencyMonitoringService = { getLatestSnapshot: jest.fn() };
 
 const adminReq = (role = 'admin') => ({ user: { walletAddress: 'GADMIN', role }, ip: '127.0.0.1' });
 const toExecutionContext = (role?: string): ExecutionContext =>
@@ -26,6 +37,9 @@ describe('AdminController', () => {
       providers: [
         { provide: AdminService, useValue: mockAdminService },
         { provide: AuditService, useValue: mockAuditService },
+        { provide: PrivacyService, useValue: mockPrivacyService },
+        { provide: RateLimitService, useValue: mockRateLimitService },
+        { provide: SolvencyMonitoringService, useValue: mockSolvencyMonitoringService },
       ],
     })
       .overrideGuard(JwtAuthGuard).useValue({ canActivate: () => true })
@@ -48,6 +62,21 @@ describe('AdminController', () => {
       expect(mockAuditService.write).toHaveBeenCalledWith(
         expect.objectContaining({ actor: 'GADMIN', action: 'reindex', payload: expect.objectContaining({ fromLedger: 500 }) }),
       );
+    });
+  });
+
+  describe('GET /admin/solvency', () => {
+    it('returns snapshot from cache service only', async () => {
+      const snap = {
+        status: 'ok' as const,
+        checkedAt: '2026-01-01T00:00:00.000Z',
+        thresholdStroops: '0',
+        alertEmitted: false,
+      };
+      mockSolvencyMonitoringService.getLatestSnapshot.mockResolvedValue(snap);
+      const result = await controller.getSolvencySnapshot();
+      expect(result).toEqual({ snapshot: snap });
+      expect(mockSolvencyMonitoringService.getLatestSnapshot).toHaveBeenCalled();
     });
   });
 

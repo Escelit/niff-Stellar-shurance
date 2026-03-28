@@ -785,6 +785,64 @@ export class SorobanService {
   }
 
   /**
+   * Simulate `get_treasury_balance()` → i128 (contract-held default token balance).
+   * Used by scheduled solvency checks; throws on simulation/RPC failure (no silent fallback).
+   */
+  async simulateGetTreasuryBalance(args: {
+    sourceAccount: string;
+  }): Promise<{ balanceStroops: string; minResourceFee: string }> {
+    return this.trackRpc('simulate_get_treasury_balance', () =>
+      this._simulateGetTreasuryBalance(args),
+    );
+  }
+
+  private async _simulateGetTreasuryBalance(args: {
+    sourceAccount: string;
+  }): Promise<{ balanceStroops: string; minResourceFee: string }> {
+    const cid = this.contractId;
+    if (!cid) {
+      throw new BadRequestException({
+        code: 'CONTRACT_NOT_CONFIGURED',
+        message: 'CONTRACT_ID is not set.',
+      });
+    }
+
+    const server = this.makeServer();
+    const account = await this.loadAccount(server, args.sourceAccount);
+    const contract = new Contract(cid);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(contract.call('get_treasury_balance'))
+      .setTimeout(30)
+      .build();
+
+    const simulation = await server.simulateTransaction(tx);
+    if (Api.isSimulationError(simulation)) {
+      const errMsg =
+        typeof simulation.error === 'string'
+          ? simulation.error
+          : JSON.stringify(simulation.error ?? {});
+      this.mapSimulationError(errMsg);
+    }
+
+    const success = simulation as SorobanRpc.Api.SimulateTransactionSuccessResponse;
+    const retval = success.result?.retval;
+    let balance = BigInt(0);
+    if (retval) {
+      const native = scValToNative(retval);
+      balance =
+        typeof native === 'bigint' ? native : BigInt(String(native));
+    }
+
+    return {
+      balanceStroops: balance.toString(),
+      minResourceFee: success.minResourceFee ?? '0',
+    };
+  }
+
+  /**
    * TypeScript mirror of compute_premium in contracts/niffyinsure/src/premium.rs.
    * Uses BigInt to match Rust i128 integer arithmetic exactly.
    */

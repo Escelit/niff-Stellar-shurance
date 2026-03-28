@@ -103,4 +103,38 @@ export const validationSchema = Joi.object({
   TENANT_BASE_DOMAIN: Joi.string()
     .default("niffyinsur.com")
     .description("Base domain for subdomain-based tenant resolution"),
+  // Solvency monitoring (scheduled job + Redis snapshot for admin dashboard)
+  SOLVENCY_MONITORING_ENABLED: Joi.string()
+    .valid("true", "false", "1", "0")
+    .default("true")
+    .description(
+      "When false/0, cron skips chain/DB work and writes an unknown snapshot (env string)",
+    ),
+  SOLVENCY_BUFFER_THRESHOLD_STROOPS: Joi.string()
+    .pattern(/^\d+$/)
+    .default("0")
+    .description(
+      "Minimum required buffer (on-chain balance − approved-unpaid claims); alert if below",
+    ),
+  SOLVENCY_SIMULATION_SOURCE_ACCOUNT: Joi.string()
+    .allow("")
+    .default("")
+    .description(
+      "Funded account public key used as Soroban simulation source for get_treasury_balance",
+    ),
+  SOLVENCY_CRON_EXPRESSION: Joi.string()
+    .default("0 */15 * * * *")
+    .description("Six-field cron (node-cron) for solvency checks; change via env, restart process"),
+  SOLVENCY_ALERT_WEBHOOK_URL: Joi.string()
+    .allow("")
+    .optional()
+    .description("Optional URL for solvency buffer-low POST payloads"),
+  SOLVENCY_ALERT_WEBHOOK_SECRET: Joi.string()
+    .allow("")
+    .default("")
+    .description("Optional shared secret header for solvency webhook"),
+  SOLVENCY_TENANT_ID: Joi.string()
+    .allow("")
+    .optional()
+    .description("When set, outstanding-claims sum is scoped to this tenantId"),
 });
