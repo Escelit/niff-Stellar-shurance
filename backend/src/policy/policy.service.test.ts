@@ -8,7 +8,7 @@
 import type { BuildTransactionResult } from '../rpc/soroban.service';
 import {
   AgeBandEnum,
-  CoverageTypeEnum,
+  CoverageTierEnum,
   PolicyTypeEnum,
   RegionTierEnum,
 } from '../quote/dto/generate-premium.dto';
@@ -33,7 +33,7 @@ const VALID_DTO: BuildTransactionDto = {
   policy_type: PolicyTypeEnum.Auto,
   region: RegionTierEnum.Low,
   age_band: AgeBandEnum.Adult,
-  coverage_type: CoverageTypeEnum.Basic,
+  coverage_tier: CoverageTierEnum.Basic,
   safety_score: 74,
   base_amount: '1000000000',
 };

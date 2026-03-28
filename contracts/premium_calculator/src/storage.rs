@@ -1,6 +1,6 @@
 use soroban_sdk::{contracttype, Address, Env, Map};
 
-use crate::types::{AgeBand, CoverageType, MultiplierTable, RegionTier};
+use crate::types::{AgeBand, CoverageTier, MultiplierTable, RegionTier};
 
 #[contracttype]
 pub enum DataKey {
@@ -48,9 +48,9 @@ pub fn default_table(env: &Env) -> MultiplierTable {
     age.set(AgeBand::Senior, 11_500i128);
 
     let mut coverage = Map::new(env);
-    coverage.set(CoverageType::Basic, 9_000i128);
-    coverage.set(CoverageType::Standard, 10_000i128);
-    coverage.set(CoverageType::Premium, 13_000i128);
+    coverage.set(CoverageTier::Basic, 9_000i128);
+    coverage.set(CoverageTier::Standard, 10_000i128);
+    coverage.set(CoverageTier::Premium, 13_000i128);
 
     MultiplierTable {
         region,

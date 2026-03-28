@@ -181,7 +181,7 @@ pub fn is_vote_deadline_passed(now: u32, filed_at: u32, vote_window: u32) -> boo
 /// Validates admin-supplied voting duration before it is written to instance storage.
 #[inline]
 pub fn validate_voting_duration_ledgers(v: u32) -> Result<(), crate::validate::Error> {
-    if v < MIN_VOTING_DURATION_LEDGERS || v > MAX_VOTING_DURATION_LEDGERS {
+    if !(MIN_VOTING_DURATION_LEDGERS..=MAX_VOTING_DURATION_LEDGERS).contains(&v) {
         return Err(crate::validate::Error::VotingDurationOutOfBounds);
     }
     Ok(())

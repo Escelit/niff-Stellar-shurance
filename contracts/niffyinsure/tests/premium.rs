@@ -5,7 +5,7 @@ use niffyinsure::{
         checked_div, checked_mul_ratio, compute_premium, default_multiplier_table,
         round_to_multiple, Rounding, MAX_MULTIPLIER, MIN_MULTIPLIER,
     },
-    types::{AgeBand, CoverageType, MultiplierTable, RegionTier, RiskInput},
+    types::{AgeBand, CoverageTier, MultiplierTable, RegionTier, RiskInput},
     validate::Error,
     NiffyInsureClient,
 };
@@ -14,7 +14,7 @@ use soroban_sdk::{map, testutils::Address as _, Address, Env, Map};
 fn risk_input(
     region: RegionTier,
     age_band: AgeBand,
-    coverage: CoverageType,
+    coverage: CoverageTier,
     safety_score: u32,
 ) -> RiskInput {
     RiskInput {
@@ -47,9 +47,9 @@ fn make_table(
     ];
     let coverage = map![
         env,
-        (CoverageType::Basic, coverage_value),
-        (CoverageType::Standard, coverage_value),
-        (CoverageType::Premium, coverage_value)
+        (CoverageTier::Basic, coverage_value),
+        (CoverageTier::Standard, coverage_value),
+        (CoverageTier::Premium, coverage_value)
     ];
 
     MultiplierTable {
@@ -65,7 +65,7 @@ fn make_table(
 fn pure_compute_premium_matches_expected_rounding_order() {
     let env = Env::default();
     let table = default_multiplier_table(&env);
-    let input = risk_input(RegionTier::High, AgeBand::Young, CoverageType::Premium, 80);
+    let input = risk_input(RegionTier::High, AgeBand::Young, CoverageTier::Premium, 80);
 
     let computation = compute_premium(&input, 12_345_678, &table).unwrap();
 
@@ -112,7 +112,7 @@ fn extreme_inputs_do_not_wrap_and_overflow_is_reported() {
     let input = risk_input(
         RegionTier::High,
         AgeBand::Senior,
-        CoverageType::Premium,
+        CoverageTier::Premium,
         100,
     );
 
@@ -142,7 +142,7 @@ fn min_and_max_multiplier_tables_produce_monotonic_outputs() {
     let input = risk_input(
         RegionTier::Medium,
         AgeBand::Adult,
-        CoverageType::Standard,
+        CoverageTier::Standard,
         0,
     );
 
@@ -236,9 +236,9 @@ fn missing_rows_are_rejected() {
     ];
     let coverage = map![
         &env,
-        (CoverageType::Basic, 10_000),
-        (CoverageType::Standard, 10_000),
-        (CoverageType::Premium, 10_000)
+        (CoverageTier::Basic, 10_000),
+        (CoverageTier::Standard, 10_000),
+        (CoverageTier::Premium, 10_000)
     ];
 
     let invalid = MultiplierTable {

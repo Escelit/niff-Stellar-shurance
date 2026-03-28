@@ -18,5 +18,11 @@
     "active": "Active",
     "expired": "Expired",
     "pending": "Pending"
+  },
+  "coverageTier": {
+    "label": "Coverage Tier",
+    "Basic": "Basic",
+    "Standard": "Standard",
+    "Premium": "Premium"
   }
 }

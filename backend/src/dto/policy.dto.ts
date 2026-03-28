@@ -10,7 +10,7 @@
  * - Fields are documented with JSDoc for OpenAPI generation.
  */
 
-import { Claim, Policy } from "../types/policy";
+import { Claim, CoverageTier, Policy } from "../types/policy";
 
 /** Summary of a related claim, linked from a policy response. */
 export interface ClaimSummaryDto {
@@ -115,6 +115,8 @@ export interface PolicyDto {
    * @example "Auto"
    */
   policy_type: "Auto" | "Health" | "Property";
+  /** Coverage tier used for premium calculation. @example "Standard" */
+  coverage_tier: CoverageTier;
   /**
    * Geographic risk tier used for premium calculation.
    * @example "Medium"
@@ -184,6 +186,7 @@ export function toPolicyDto(p: Policy, claims: Claim[]): PolicyDto {
     holder: p.holder,
     policy_id: p.policy_id,
     policy_type: p.policy_type,
+    coverage_tier: p.coverage_tier,
     region: p.region,
     is_active: p.is_active,
     coverage_summary: {

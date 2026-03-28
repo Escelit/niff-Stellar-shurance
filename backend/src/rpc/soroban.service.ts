@@ -32,7 +32,7 @@ const { Api, assembleTransaction } = SorobanRpc;
 export type PolicyTypeEnum = 'Auto' | 'Health' | 'Property';
 export type RegionTierEnum = 'Low' | 'Medium' | 'High';
 export type AgeBandEnum = 'Young' | 'Adult' | 'Senior';
-export type CoverageTypeEnum = 'Basic' | 'Standard' | 'Premium';
+export type CoverageTierEnum = 'Basic' | 'Standard' | 'Premium';
 
 export interface SimulatePremiumResult {
   premiumStroops: string;
@@ -301,7 +301,7 @@ export class SorobanService {
   /**
    * Build unsigned initiate_policy transaction with simulation-derived footprints.
    * Argument ordering matches `contracts/niffyinsure/src/lib.rs` initiate_policy:
-   * holder, policy_type, region, age_band, coverage_type, safety_score,
+   * holder, policy_type, region, age_band, coverage_tier, safety_score,
    * base_amount, asset, beneficiary (optional payout address).
    */
   async buildInitiatePolicyTransaction(args: {
@@ -309,7 +309,7 @@ export class SorobanService {
     policyType: PolicyTypeEnum;
     region: RegionTierEnum;
     ageBand: AgeBandEnum;
-    coverageType: CoverageTypeEnum;
+    coverageType: CoverageTierEnum;
     safetyScore: number;
     baseAmount: bigint;
     asset?: string;
@@ -325,7 +325,7 @@ export class SorobanService {
     policyType: PolicyTypeEnum;
     region: RegionTierEnum;
     ageBand: AgeBandEnum;
-    coverageType: CoverageTypeEnum;
+    coverageType: CoverageTierEnum;
     safetyScore: number;
     baseAmount: bigint;
     asset?: string;

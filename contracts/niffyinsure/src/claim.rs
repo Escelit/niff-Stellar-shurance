@@ -96,6 +96,7 @@ struct ClaimFiled {
     #[topic]
     pub claim_id: u64,
     pub holder: Address,
+    pub image_hash: u64,
 }
 
 /// Emitted as the authoritative rejection signal. Indexers must consume this
@@ -255,6 +256,7 @@ pub fn file_claim(
     ClaimFiled {
         claim_id,
         holder: holder.clone(),
+        image_hash: hash_image_urls(image_urls),
     }
     .publish(env);
 
@@ -562,10 +564,6 @@ pub fn get_claim(env: &Env, claim_id: u64) -> Result<Claim, Error> {
 pub fn get_claim_history(env: &Env, claim_id: u64) -> Result<Vec<ClaimStatusHistoryEntry>, Error> {
     let c = storage::get_claim(env, claim_id).ok_or(Error::ClaimNotFound)?;
     Ok(c.status_history)
-}
-
-pub fn is_allowed_asset(env: &Env, asset: &Address) -> bool {
-    storage::is_allowed_asset(env, asset)
 }
 
 pub fn set_allowed_asset(env: &Env, asset: &Address, allowed: bool) {

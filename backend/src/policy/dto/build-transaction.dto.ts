@@ -13,7 +13,7 @@ import {
 } from 'class-validator';
 import {
   AgeBandEnum,
-  CoverageTypeEnum,
+  CoverageTierEnum,
   PolicyTypeEnum,
   RegionTierEnum,
 } from '../../quote/dto/generate-premium.dto';
@@ -51,9 +51,9 @@ export class BuildTransactionDto {
   @IsEnum(AgeBandEnum)
   age_band!: AgeBandEnum;
 
-  @ApiProperty({ enum: CoverageTypeEnum })
-  @IsEnum(CoverageTypeEnum)
-  coverage_type!: CoverageTypeEnum;
+  @ApiProperty({ enum: CoverageTierEnum })
+  @IsEnum(CoverageTierEnum)
+  coverage_tier!: CoverageTierEnum;
 
   @ApiProperty({
     description: 'Safety score 0–100 (matches on-chain initiate_policy).',

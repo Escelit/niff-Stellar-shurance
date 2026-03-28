@@ -2,7 +2,7 @@
 
 use niffyinsure::{
     premium::{compute_premium, default_multiplier_table},
-    types::{AgeBand, CoverageType, RegionTier, RiskInput},
+    types::{AgeBand, CoverageTier, RegionTier, RiskInput},
 };
 use soroban_sdk::Env;
 
@@ -16,7 +16,7 @@ fn default_table_matches_known_reference_vectors() {
             RiskInput {
                 region: RegionTier::Medium,
                 age_band: AgeBand::Adult,
-                coverage: CoverageType::Standard,
+                coverage: CoverageTier::Standard,
                 safety_score: 0,
             },
             10_000_000i128,
@@ -26,7 +26,7 @@ fn default_table_matches_known_reference_vectors() {
             RiskInput {
                 region: RegionTier::High,
                 age_band: AgeBand::Young,
-                coverage: CoverageType::Premium,
+                coverage: CoverageTier::Premium,
                 safety_score: 80,
             },
             12_345_678i128,
@@ -36,7 +36,7 @@ fn default_table_matches_known_reference_vectors() {
             RiskInput {
                 region: RegionTier::Low,
                 age_band: AgeBand::Senior,
-                coverage: CoverageType::Basic,
+                coverage: CoverageTier::Basic,
                 safety_score: 100,
             },
             5_000_000i128,

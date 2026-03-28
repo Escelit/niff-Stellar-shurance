@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use niffyinsure::{
-    types::{AgeBand, Claim, ClaimStatus, CoverageType, PolicyType, RegionTier},
+    types::{AgeBand, Claim, ClaimStatus, CoverageTier, PolicyType, RegionTier},
     NiffyInsureClient,
 };
 use soroban_sdk::{
@@ -58,7 +58,7 @@ fn initiate(
         &PolicyType::Auto,
         &RegionTier::Low,
         &AgeBand::Adult,
-        &CoverageType::Standard,
+        &CoverageTier::Standard,
         &10u32,
         &1_000_000_000i128,
         token_addr,
@@ -93,6 +93,7 @@ fn inject_approved_claim(
         appeal_deadline_ledger: 0,
         appeal_approve_votes: 0,
         appeal_reject_votes: 0,
+        status_history: soroban_sdk::Vec::new(env),
     };
     env.as_contract(contract_id, || {
         niffyinsure::storage::set_claim(env, &claim);

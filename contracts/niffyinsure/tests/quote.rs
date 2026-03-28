@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use niffyinsure::{
-    types::{AgeBand, CoverageType, RegionTier, RiskInput},
+    types::{AgeBand, CoverageTier, RegionTier, RiskInput},
     validate::Error,
     NiffyInsureClient,
 };
@@ -11,7 +11,7 @@ fn default_risk_input() -> RiskInput {
     RiskInput {
         region: RegionTier::Medium,
         age_band: AgeBand::Adult,
-        coverage: CoverageType::Standard,
+        coverage: CoverageTier::Standard,
         safety_score: 50,
     }
 }
@@ -61,19 +61,19 @@ fn generate_premium_matches_golden_vectors_bit_for_bit() {
     let medium_adult_standard = RiskInput {
         region: RegionTier::Medium,
         age_band: AgeBand::Adult,
-        coverage: CoverageType::Standard,
+        coverage: CoverageTier::Standard,
         safety_score: 50,
     };
     let high_young_premium = RiskInput {
         region: RegionTier::High,
         age_band: AgeBand::Young,
-        coverage: CoverageType::Premium,
+        coverage: CoverageTier::Premium,
         safety_score: 80,
     };
     let low_senior_basic = RiskInput {
         region: RegionTier::Low,
         age_band: AgeBand::Senior,
-        coverage: CoverageType::Basic,
+        coverage: CoverageTier::Basic,
         safety_score: 0,
     };
 
@@ -112,7 +112,7 @@ fn generate_premium_returns_structured_validation_errors() {
     let bad_input = RiskInput {
         region: RegionTier::Low,
         age_band: AgeBand::Adult,
-        coverage: CoverageType::Basic,
+        coverage: CoverageTier::Basic,
         safety_score: 101,
     };
 

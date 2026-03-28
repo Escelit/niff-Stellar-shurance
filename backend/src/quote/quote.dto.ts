@@ -2,7 +2,7 @@
  * Quote service DTOs.
  *
  * Zod schemas mirror the contract types in:
- *   contracts/niffyinsure/src/types.rs  (PolicyType, RegionTier)
+ *   contracts/niffyinsure/src/types.rs  (PolicyType, RegionTier, CoverageTier)
  *   contracts/niffyinsure/src/premium.rs (compute_premium constraints)
  *
  * Validation here prevents invalid inputs from ever reaching the Soroban RPC.
@@ -15,11 +15,15 @@ export const PolicyTypeSchema = z.enum(['Auto', 'Health', 'Property']);
 
 export const RegionTierSchema = z.enum(['Low', 'Medium', 'High']);
 
+export const CoverageTierSchema = z.enum(['Basic', 'Standard', 'Premium']);
+
 export const GeneratePremiumDtoSchema = z.object({
   /** Insurance coverage category. */
   policy_type: PolicyTypeSchema,
   /** Geographic risk tier. */
   region: RegionTierSchema,
+  /** Coverage tier (maps to CoverageTier enum on-chain). */
+  coverage_tier: CoverageTierSchema,
   /**
    * Policyholder age in years.
    * Age buckets in premium.rs: <25 → high-risk; 25-60 → standard; >60 → senior.

@@ -10,12 +10,12 @@
 #![cfg(test)]
 
 use niffyinsure::{
-    types::{AgeBand, CoverageType, RegionTier, RiskInput},
+    types::{AgeBand, CoverageTier, RegionTier, RiskInput},
     NiffyInsureClient,
 };
 use premium_calculator::{
     types::{
-        AgeBand as CalcAgeBand, CalcInput, CoverageType as CalcCoverageType,
+        AgeBand as CalcAgeBand, CalcInput, CoverageTier as CalcCoverageTier,
         RegionTier as CalcRegionTier,
     },
     PremiumCalculatorClient,
@@ -45,7 +45,7 @@ fn standard_risk_input() -> RiskInput {
     RiskInput {
         region: RegionTier::Medium,
         age_band: AgeBand::Adult,
-        coverage: CoverageType::Standard,
+        coverage: CoverageTier::Standard,
         safety_score: 0,
     }
 }
@@ -54,7 +54,7 @@ fn standard_calc_input(base: i128) -> CalcInput {
     CalcInput {
         region: CalcRegionTier::Medium,
         age_band: CalcAgeBand::Adult,
-        coverage: CalcCoverageType::Standard,
+        coverage: CalcCoverageTier::Standard,
         safety_score: 0,
         base_amount: base,
     }
@@ -109,7 +109,7 @@ fn calculator_rotation_changes_pricing() {
 
     // Upgrade v1 calculator with a higher-risk table (version 2)
     use premium_calculator::types::{
-        AgeBand as CA, CoverageType as CC, MultiplierTable, RegionTier as CR,
+        AgeBand as CA, CoverageTier as CC, MultiplierTable, RegionTier as CR,
     };
     use soroban_sdk::Map;
     let mut region = Map::new(&env);
@@ -241,7 +241,7 @@ fn calculator_rejects_zero_base_amount() {
     let bad_input = CalcInput {
         region: CalcRegionTier::Low,
         age_band: CalcAgeBand::Adult,
-        coverage: CalcCoverageType::Basic,
+        coverage: CalcCoverageTier::Basic,
         safety_score: 0,
         base_amount: 0,
     };

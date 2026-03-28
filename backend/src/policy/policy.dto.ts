@@ -2,7 +2,7 @@
  * Policy bind DTOs (Zod).
  *
  * Schemas align with the contract argument ordering for initiate_policy:
- *   holder, policy_type, region, age_band, coverage_type, safety_score,
+ *   holder, policy_type, region, age_band, coverage_tier, safety_score,
  *   base_amount, asset (optional), beneficiary (optional).
  */
 
@@ -14,7 +14,7 @@ const RegionTierSchema = z.enum(['Low', 'Medium', 'High']);
 
 const AgeBandSchema = z.enum(['Young', 'Adult', 'Senior']);
 
-const CoverageTypeSchema = z.enum(['Basic', 'Standard', 'Premium']);
+const CoverageTierSchema = z.enum(['Basic', 'Standard', 'Premium']);
 
 export const BuildTransactionDtoSchema = z.object({
   holder: z
@@ -27,7 +27,7 @@ export const BuildTransactionDtoSchema = z.object({
   policy_type: PolicyTypeSchema,
   region: RegionTierSchema,
   age_band: AgeBandSchema,
-  coverage_type: CoverageTypeSchema,
+  coverage_tier: CoverageTierSchema,
 
   safety_score: z
     .number()

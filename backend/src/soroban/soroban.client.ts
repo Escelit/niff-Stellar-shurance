@@ -32,7 +32,7 @@ type SimResult = SorobanRpc.Api.SimulateTransactionResponse;
 export type PolicyTypeEnum = 'Auto' | 'Health' | 'Property';
 export type RegionTierEnum = 'Low' | 'Medium' | 'High';
 export type AgeBandEnum = 'Young' | 'Adult' | 'Senior';
-export type CoverageTypeEnum = 'Basic' | 'Standard' | 'Premium';
+export type CoverageTierEnum = 'Basic' | 'Standard' | 'Premium';
 
 export interface SimulatePremiumResult {
   premiumStroops: string;
@@ -211,7 +211,7 @@ export async function simulateGeneratePremium(args: {
  * resource footprints.  Returns the base64 XDR for wallet signing.
  *
  * Argument ordering matches on-chain initiate_policy: holder, policy_type, region,
- * age_band, coverage_type, safety_score, base_amount, asset, beneficiary.
+ * age_band, coverage_tier, safety_score, base_amount, asset, beneficiary.
  *
  * Multisig: `authRequirements` lists all addresses that must sign the Soroban
  * auth entries before submission. Display these to the user before the wallet popup.
@@ -224,7 +224,7 @@ export async function buildInitiatePolicyTransaction(args: {
   policyType: PolicyTypeEnum;
   region: RegionTierEnum;
   ageBand: AgeBandEnum;
-  coverageType: CoverageTypeEnum;
+  coverageType: CoverageTierEnum;
   safetyScore: number;
   baseAmount: bigint;
   asset?: string;

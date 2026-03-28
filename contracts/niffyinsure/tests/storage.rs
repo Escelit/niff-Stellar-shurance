@@ -531,7 +531,7 @@ fn list_claims_oversize_request_clamped() {
 
 #[test]
 fn generate_premium_does_not_mutate_counters() {
-    use niffyinsure::types::{AgeBand, CoverageType, RegionTier, RiskInput};
+    use niffyinsure::types::{AgeBand, CoverageTier, RegionTier, RiskInput};
 
     let (env, contract_id, _, _) = setup();
     let client = NiffyInsureClient::new(&env, &contract_id);
@@ -543,7 +543,7 @@ fn generate_premium_does_not_mutate_counters() {
     let input = RiskInput {
         region: RegionTier::Medium,
         age_band: AgeBand::Adult,
-        coverage: CoverageType::Standard,
+        coverage: CoverageTier::Standard,
         safety_score: 0,
     };
     client.generate_premium(&input, &10_000_000i128, &false);

@@ -1,7 +1,7 @@
 use crate::{
     storage,
     types::{
-        AgeBand, CoverageType, MultiplierTable, PremiumQuoteLineItem, PremiumTableUpdated,
+        AgeBand, CoverageTier, MultiplierTable, PremiumQuoteLineItem, PremiumTableUpdated,
         RegionTier, RiskInput,
     },
     validate::Error,
@@ -46,9 +46,9 @@ pub fn default_multiplier_table(env: &Env) -> MultiplierTable {
     age.set(AgeBand::Senior, 11_500);
 
     let mut coverage = Map::new(env);
-    coverage.set(CoverageType::Basic, 9_000);
-    coverage.set(CoverageType::Standard, 10_000);
-    coverage.set(CoverageType::Premium, 13_000);
+    coverage.set(CoverageTier::Basic, 9_000);
+    coverage.set(CoverageTier::Standard, 10_000);
+    coverage.set(CoverageTier::Premium, 13_000);
 
     MultiplierTable {
         region,
@@ -253,7 +253,7 @@ fn age_multiplier(table: &MultiplierTable, band: &AgeBand) -> Result<i128, Error
         .ok_or(Error::MissingAgeMultiplier)
 }
 
-fn coverage_multiplier(table: &MultiplierTable, level: &CoverageType) -> Result<i128, Error> {
+fn coverage_multiplier(table: &MultiplierTable, level: &CoverageTier) -> Result<i128, Error> {
     table
         .coverage
         .get(level.clone())

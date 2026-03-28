@@ -12,7 +12,7 @@ export class PolicyService {
       policyType: dto.policy_type,
       region: dto.region,
       ageBand: dto.age_band,
-      coverageType: dto.coverage_type,
+      coverageType: dto.coverage_tier,
       safetyScore: dto.safety_score,
       baseAmount: BigInt(dto.base_amount),
       asset: dto.asset,

@@ -56,13 +56,13 @@ fn make_second_asset<'a>(t: &'a TestEnv<'a>) -> (Address, token::StellarAssetCli
 }
 
 fn initiate(t: &TestEnv, holder: &Address, asset: &Address) -> niffyinsure::types::Policy {
-    use niffyinsure::types::{AgeBand, CoverageType, PolicyType, RegionTier};
+    use niffyinsure::types::{AgeBand, CoverageTier, PolicyType, RegionTier};
     t.client.initiate_policy(
         holder,
         &PolicyType::Auto,
         &RegionTier::Low,
         &AgeBand::Adult,
-        &CoverageType::Standard,
+        &CoverageTier::Standard,
         &5u32,
         &1_000_000_000i128,
         asset,
@@ -101,7 +101,7 @@ fn initiate_policy_rejects_non_allowlisted_asset() {
         &niffyinsure::types::PolicyType::Health,
         &niffyinsure::types::RegionTier::Medium,
         &niffyinsure::types::AgeBand::Adult,
-        &niffyinsure::types::CoverageType::Standard,
+        &niffyinsure::types::CoverageTier::Standard,
         &3u32,
         &500_000_000i128,
         &token_b,
@@ -378,7 +378,7 @@ fn removing_asset_from_allowlist_blocks_new_policies() {
         &niffyinsure::types::PolicyType::Auto,
         &niffyinsure::types::RegionTier::Low,
         &niffyinsure::types::AgeBand::Adult,
-        &niffyinsure::types::CoverageType::Standard,
+        &niffyinsure::types::CoverageTier::Standard,
         &5u32,
         &1_000_000_000i128,
         &token_b,

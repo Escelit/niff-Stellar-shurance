@@ -40,7 +40,7 @@ function scvTypeName(val: xdr.ScVal): string {
  * `buildInitiatePolicyTransaction`.
  *
  * Argument order MUST match contracts/niffyinsure/src/lib.rs `initiate_policy`:
- *   holder, policy_type, region, age_band, coverage_type, safety_score,
+ *   holder, policy_type, region, age_band, coverage_tier, safety_score,
  *   base_amount, asset, beneficiary (Option<Address>)
  */
 function buildInitiatePolicyArgs(inputs: Record<string, unknown>): xdr.ScVal[] {
@@ -57,7 +57,7 @@ function buildInitiatePolicyArgs(inputs: Record<string, unknown>): xdr.ScVal[] {
     enumVariantToScVal(inputs['policy_type'] as string),
     enumVariantToScVal(inputs['region'] as string),
     enumVariantToScVal(inputs['age_band'] as string),
-    enumVariantToScVal(inputs['coverage_type'] as string),
+    enumVariantToScVal(inputs['coverage_tier'] as string),
     nativeToScVal(inputs['safety_score'] as number, { type: 'u32' }),
     nativeToScVal(BigInt(inputs['base_amount'] as string), { type: 'i128' }),
     new Address(inputs['asset'] as string).toScVal(),

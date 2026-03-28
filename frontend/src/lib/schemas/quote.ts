@@ -1,5 +1,8 @@
 import { z } from 'zod'
 
+export const COVERAGE_TIERS = ['Basic', 'Standard', 'Premium'] as const
+export type CoverageTier = (typeof COVERAGE_TIERS)[number]
+
 export const QuoteFormSchema = z.object({
   contractAddress: z.string()
     .min(1, 'Contract address is required')
@@ -10,6 +13,10 @@ export const QuoteFormSchema = z.object({
     .max(1000000, 'Maximum coverage amount is 1,000,000 XLM')
     .positive('Coverage amount must be positive'),
   
+  coverageTier: z.enum(COVERAGE_TIERS, {
+    message: 'Please select a coverage tier',
+  }),
+
   riskCategory: z.enum(['LOW', 'MEDIUM', 'HIGH'], {
     message: 'Please select a risk category'
   }),

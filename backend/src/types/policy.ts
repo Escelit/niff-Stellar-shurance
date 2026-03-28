@@ -6,6 +6,7 @@
 
 export type PolicyType = "Auto" | "Health" | "Property";
 export type RegionTier = "Low" | "Medium" | "High";
+export type CoverageTier = "Basic" | "Standard" | "Premium";
 export type ClaimStatus = "Processing" | "Approved" | "Rejected";
 
 /** On-chain Policy record (internal representation). */
@@ -15,6 +16,7 @@ export interface Policy {
   /** Per-holder monotonic u32 (starts at 1). Not globally unique alone. */
   policy_id: number;
   policy_type: PolicyType;
+  coverage_tier: CoverageTier;
   region: RegionTier;
   /** Annual premium in stroops (i128 stored as string). */
   premium: string;

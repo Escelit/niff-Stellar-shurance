@@ -84,7 +84,7 @@ pub enum AgeBand {
 
 #[contracttype]
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum CoverageType {
+pub enum CoverageTier {
     Basic,
     Standard,
     Premium,
@@ -268,7 +268,7 @@ pub struct ClaimSummary {
 pub struct RiskInput {
     pub region: RegionTier,
     pub age_band: AgeBand,
-    pub coverage: CoverageType,
+    pub coverage: CoverageTier,
     pub safety_score: u32,
 }
 
@@ -277,7 +277,7 @@ pub struct RiskInput {
 pub struct MultiplierTable {
     pub region: Map<RegionTier, i128>,
     pub age: Map<AgeBand, i128>,
-    pub coverage: Map<CoverageType, i128>,
+    pub coverage: Map<CoverageTier, i128>,
     pub safety_discount: i128,
     pub version: u32,
 }

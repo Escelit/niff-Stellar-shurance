@@ -27,7 +27,7 @@ export enum AgeBandEnum {
   Senior = 'Senior',
 }
 
-export enum CoverageTypeEnum {
+export enum CoverageTierEnum {
   Basic = 'Basic',
   Standard = 'Standard',
   Premium = 'Premium',
@@ -45,6 +45,12 @@ export class GeneratePremiumDto {
     message: "region must be one of: 'Low', 'Medium', 'High'",
   })
   region!: RegionTierEnum;
+
+  @ApiProperty({ enum: CoverageTierEnum })
+  @IsEnum(CoverageTierEnum, {
+    message: "coverage_tier must be one of: 'Basic', 'Standard', 'Premium'",
+  })
+  coverage_tier!: CoverageTierEnum;
 
   @ApiProperty({ minimum: 1, maximum: 120, description: 'Policyholder age in years' })
   @IsInt()

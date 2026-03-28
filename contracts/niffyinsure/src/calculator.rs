@@ -12,7 +12,7 @@ use soroban_sdk::{contractclient, Address, Env};
 
 use crate::{
     premium, storage,
-    types::{AgeBand, CoverageType, PremiumQuote, RegionTier, RiskInput},
+    types::{AgeBand, CoverageTier, PremiumQuote, RegionTier, RiskInput},
     validate::Error,
 };
 
@@ -182,9 +182,9 @@ fn to_calc_input(input: &RiskInput, base_amount: i128) -> CalcInput {
             AgeBand::Senior => CalcAgeBand::Senior,
         },
         coverage: match input.coverage {
-            CoverageType::Basic => CalcCoverageType::Basic,
-            CoverageType::Standard => CalcCoverageType::Standard,
-            CoverageType::Premium => CalcCoverageType::Premium,
+            CoverageTier::Basic => CalcCoverageType::Basic,
+            CoverageTier::Standard => CalcCoverageType::Standard,
+            CoverageTier::Premium => CalcCoverageType::Premium,
         },
         safety_score: input.safety_score,
         base_amount,
