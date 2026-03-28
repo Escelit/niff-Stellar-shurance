@@ -2,10 +2,15 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import React, { useState } from 'react';
+
 import { Stepper, StepContent, Card, CardHeader, CardTitle, CardDescription, CardContent, Button, useToast } from '@/components/ui';
+import { useWallet } from '@/hooks/use-wallet'; // Assuming this exists based on common patterns
+import { ClaimAPI } from '@/lib/api/claim';
+
 import { AmountStep } from './steps/AmountStep';
-import { NarrativeStep } from './steps/NarrativeStep';
 import { EvidenceStep } from './steps/EvidenceStep';
+import { NarrativeStep } from './steps/NarrativeStep';
 import { ReviewStep } from './steps/ReviewStep';
 import { ClaimAPI } from '@/lib/api/claim';
 import { useWallet } from '@/hooks/use-wallet';

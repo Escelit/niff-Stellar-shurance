@@ -1,10 +1,11 @@
 'use client'
 
-import { Button } from '@/components/ui/button'
 import { ArrowRight, Rocket, Star } from 'lucide-react'
 import Link from 'next/link'
 import { Suspense } from 'react'
 import { RampSection } from '@/components/ramp/ramp-section'
+
+import { Button } from '@/components/ui/button'
 
 export function CTA() {
   return (

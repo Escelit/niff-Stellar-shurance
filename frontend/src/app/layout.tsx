@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
+
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/toaster";
 import { inter, ibmPlexMono } from "@/lib/fonts";
-import { ThemeProvider } from "@/components/theme-provider";
 
 export const viewport: Viewport = {
   width: "device-width",
