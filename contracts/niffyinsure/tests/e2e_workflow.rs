@@ -86,6 +86,7 @@ fn e2e_full_lifecycle_approve() {
         &1_000_000, // base_amount (coverage)
         &token,
         &None,
+        &None,
     );
     assert!(policy.is_active);
     let policy_id = policy.policy_id;
@@ -142,6 +143,7 @@ fn e2e_full_lifecycle_reject() {
         &500_000,
         &token,
         &None,
+        &None,
     );
     let policy_id = policy.policy_id;
 
@@ -181,6 +183,7 @@ fn e2e_finalize_after_deadline() {
         &70,
         &2_000_000,
         &token,
+        &None,
         &None,
     );
     let policy_id = policy.policy_id;
@@ -232,6 +235,7 @@ fn e2e_pause_blocks_initiate() {
         &1_000_000,
         &token,
         &None,
+        &None,
     );
     assert!(result.is_err());
 }
@@ -253,6 +257,7 @@ fn e2e_pause_blocks_file_claim() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
 
@@ -284,6 +289,7 @@ fn e2e_pause_blocks_vote() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
 
@@ -323,6 +329,7 @@ fn e2e_unpause_restores_operations() {
         &1_000_000,
         &token,
         &None,
+        &None,
     );
     assert!(policy.is_active);
 }
@@ -349,6 +356,7 @@ fn e2e_pause_allows_payout() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
 
@@ -389,6 +397,7 @@ fn e2e_bind_pause_allows_claims() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
 
@@ -433,6 +442,7 @@ fn e2e_claims_pause_allows_binding() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
     assert!(policy.is_active);
@@ -482,6 +492,7 @@ fn e2e_non_admin_cannot_process_claim() {
         &1_000_000,
         &token,
         &None,
+        &None,
     );
 
     let details = String::from_str(&env, "Test");
@@ -512,6 +523,7 @@ fn e2e_claim_exceeds_coverage() {
         &80,
         &100_000, // coverage
         &token,
+        &None,
         &None,
     );
 
@@ -544,6 +556,7 @@ fn e2e_claim_on_inactive_policy() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
 
@@ -588,6 +601,7 @@ fn e2e_double_vote_fails() {
         &80,
         &1_000_000,
         &token,
+        &None,
         &None,
     );
 

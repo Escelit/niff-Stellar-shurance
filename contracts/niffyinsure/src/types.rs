@@ -257,6 +257,8 @@ pub struct ClaimSummary {
     pub claim_id: u64,
     pub policy_id: u32,
     pub amount: i128,
+    /// Deductible snapshot (from filing); net payout is not stored here — see payout events.
+    pub deductible: i128,
     pub status: ClaimStatus,
     pub filed_at: u32,
     /// Same field as `Claim::voting_deadline_ledger` — authoritative for UI / indexers.
@@ -314,6 +316,11 @@ pub struct ClaimProcessed {
     #[topic]
     pub claim_id: u64,
     pub recipient: Address,
+    /// Gross approved claim amount (before deductible), same units as policy asset.
+    pub gross_amount: i128,
+    /// Policy deductible applied at payout (snapshot from claim record).
+    pub deductible: i128,
+    /// Net token transfer: `gross_amount - deductible` (must be > 0 when this event fires).
     pub amount: i128,
 }
 
@@ -334,6 +341,17 @@ pub struct Policy {
     /// SEP-41 asset contract used for this policy's premium payment and claim payout.
     /// Must be allowlisted at the time of policy initiation.
     pub asset: Address,
+    /// Optional per-claim deductible in the **same asset units** as premium and payout.
+    ///
+    /// # Product rule (coverage cap interaction)
+    /// The per-claim coverage cap enforced at filing is `coverage` (see `check_claim_fields`).
+    /// The deductible does **not** reduce that cap: the claimant may file up to `coverage` stroops.
+    /// At payout, **deductible is subtracted from the approved claim amount** (gross), so the
+    /// treasury transfers `gross - deductible` when net &gt; 0; otherwise `process_claim` returns
+    /// `ClaimAmountZero` on `validate::Error` (no spare `contracterror` variant on this contract).
+    ///
+    /// `None` or omitted semantics: treated as zero deductible at bind and payout.
+    pub deductible: Option<i128>,
     /// Optional payout destination for approved claims. When unset (`None`), funds are sent to `holder`.
     ///
     /// **Phishing / social-engineering risk:** A malicious interface could trick the holder into
@@ -365,6 +383,19 @@ pub struct Policy {
     pub strike_count: u32,
 }
 
+/// Return value of [`crate::policy::renew_policy`].
+///
+/// When the policy is already at or past `end_ledger`, the call **succeeds** with [`Lapsed`](Self::Lapsed)
+/// so that [`crate::policy::PolicyExpired`] and idempotency storage are committed (a failed `Result::Err`
+/// invocation would roll those writes back).
+#[contracttype]
+#[derive(Clone)]
+pub enum RenewPolicyOutcome {
+    Renewed(Policy),
+    /// Ledger is at or after `end_ledger`; expiry notice recorded if due; no premium taken.
+    Lapsed,
+}
+
 /// On-chain claim record.
 ///
 /// `filed_at` is the ledger sequence at which the claim was filed.
@@ -378,6 +409,8 @@ pub struct Claim {
     pub policy_id: u32,
     pub claimant: Address,
     pub amount: i128,
+    /// Deductible copied from the policy at `file_claim` time (0 if policy had no deductible).
+    pub deductible: i128,
     /// SEP-41 asset contract bound to the policy at filing time.
     pub asset: Address,
     pub details: String,
@@ -405,6 +438,18 @@ pub struct Claim {
     /// [`CLAIM_STATUS_HISTORY_MAX`]; on overflow the oldest entries are removed.
     /// May be incomplete if the cap is exceeded; `status` is authoritative.
     pub status_history: Vec<ClaimStatusHistoryEntry>,
+}
+
+/// Per-policy rolling window accumulator for **paid** claim amounts (same ledger window for all policies).
+///
+/// `window_start` is the first ledger of the bucket: `floor(now / window_len) * window_len`.
+/// `cumulative_paid` resets when the bucket changes. Indexers can derive **remaining** as
+/// `min(rolling_claim_cap - cumulative_paid, policy.coverage)` for UX (cap is global).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingClaimWindowState {
+    pub window_start: u32,
+    pub cumulative_paid: i128,
 }
 
 #[contracttype]

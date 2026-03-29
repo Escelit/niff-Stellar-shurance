@@ -22,7 +22,7 @@
 //! ### clm_filed — ClaimFiledData
 //! topics: ("niffyins", "clm_filed", claim_id: u64, holder: Address)
 //! ```json
-//! { "version": 1, "policy_id": 3, "amount": 5000000, "evidence_hashes": ["<32-byte hex>..."], "filed_at": 1234567 }
+//! { "version": 1, "policy_id": 3, "amount": 5000000, "deductible": 0, "image_hash": 2864434397, "filed_at": 1234567 }
 //! ```
 //! - `amount`: stroops (i128)
 //! - `evidence_hashes`: SHA-256 digests (32 bytes each), same order as stored claim evidence; on-chain commitment only
