@@ -5,6 +5,7 @@ pub mod admin;
 pub mod events;
 mod calculator;
 mod claim;
+mod governance_token;
 mod ledger;
 mod rolling_claim_cap;
 mod policy;
@@ -600,6 +601,36 @@ impl NiffyInsure {
     pub fn set_rolling_claim_window_ledgers(env: Env, window_ledgers: u32) -> Result<(), AdminError> {
         let _admin = admin::require_admin(&env);
         rolling_claim_cap::try_set_window_ledgers(&env, window_ledgers)
+    }
+}
+
+/// Governance token: reserved entrypoints only when built with `--features governance-token`.
+/// No mint/transfer/balance logic — see `governance_token` module TODO.
+#[cfg(feature = "governance-token")]
+#[contractimpl]
+impl NiffyInsure {
+    pub fn gov_token_runtime_enabled(env: Env) -> bool {
+        governance_token::governance_token_effective_enabled(&env)
+    }
+
+    pub fn gov_set_token_runtime_enabled(env: Env, admin: Address, enabled: bool) {
+        admin.require_auth();
+        let stored = storage::get_admin(&env);
+        assert!(admin == stored, "only admin");
+        storage::bump_instance(&env);
+        governance_token::set_governance_token_runtime_enabled(&env, enabled);
+    }
+
+    pub fn gov_token_address(env: Env) -> Option<Address> {
+        governance_token::get_governance_token_address(&env)
+    }
+
+    pub fn gov_set_token_address_stub(env: Env, admin: Address, token: Address) {
+        admin.require_auth();
+        let stored = storage::get_admin(&env);
+        assert!(admin == stored, "only admin");
+        storage::bump_instance(&env);
+        governance_token::set_governance_token_address(&env, &token);
     }
 }
 

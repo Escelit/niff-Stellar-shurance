@@ -33,6 +33,14 @@ pub enum DataKey {
     RollingClaimCap,
     /// Ledger length of each rolling window (bucket alignment uses current ledger sequence).
     RollingClaimWindowLedgers,
+    // ── Reserved: future governance token (`governance_token` module) ────────
+    /// Runtime toggle: only meaningful when crate is built with `governance-token`.
+    /// Unset or `false` in MVP; no token logic runs unless feature + flag align.
+    GovernanceTokenRuntimeEnabled,
+    /// Future token contract address (stub storage only; no transfers in this crate yet).
+    GovernanceTokenAddress,
+    /// Future schema / migration version for governance-token config.
+    GovernanceTokenConfigVersion,
     // ── Persistent tier ──────────────────────────────────────────────────
     Policy(Address, u32),
     PolicyCounter(Address),
