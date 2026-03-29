@@ -286,6 +286,10 @@ export class IndexerService {
 
       await this.advanceCursorInTx(tx, network, event.ledger);
     });
+
+    if (parsed?.key === 'niffyins:tbl_upd') {
+      await this.quoteSimulationCache.invalidateAll();
+    }
   }
 
   private async handlePolicyInitiated(tx: IndexerTx, data: EventPayload, event: SorobanEvent) {
