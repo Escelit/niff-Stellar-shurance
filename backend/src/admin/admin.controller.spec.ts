@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
@@ -9,16 +10,14 @@ import { PrivacyService } from '../maintenance/privacy.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { AdminRoleGuard } from './guards/admin-role.guard';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PrivacyService } from '../maintenance/privacy.service';
+import { RateLimitService } from '../rate-limit/rate-limit.service';
 
 const mockAdminService = { enqueueReindex: jest.fn(), setFeatureFlag: jest.fn(), getFeatureFlags: jest.fn() };
 const mockAdminPoliciesService = { listPolicies: jest.fn(), softDeletePolicy: jest.fn() };
 const mockAuditService = { write: jest.fn(), findAll: jest.fn() };
-const mockPrivacyService = {};
-const mockRateLimitService = {
-  setLimit: jest.fn(),
-  getCounterState: jest.fn(),
-  enableOverride: jest.fn(),
-  disableOverride: jest.fn(),
+const mockConfigService = {
+  get: jest.fn((key: string, def?: string) => (key === 'STELLAR_NETWORK' ? 'testnet' : def)),
 };
 
 const adminReq = (role = 'admin') => ({ user: { walletAddress: 'GADMIN', role }, ip: '127.0.0.1' });
@@ -38,8 +37,9 @@ describe('AdminController', () => {
         { provide: AdminService, useValue: mockAdminService },
         { provide: AdminPoliciesService, useValue: mockAdminPoliciesService },
         { provide: AuditService, useValue: mockAuditService },
-        { provide: PrivacyService, useValue: mockPrivacyService },
-        { provide: RateLimitService, useValue: mockRateLimitService },
+        { provide: ConfigService, useValue: mockConfigService },
+        { provide: PrivacyService, useValue: {} },
+        { provide: RateLimitService, useValue: {} },
       ],
     })
       .overrideGuard(JwtAuthGuard).useValue({ canActivate: () => true })
@@ -57,11 +57,29 @@ describe('AdminController', () => {
     it('enqueues job and writes audit row', async () => {
       mockAdminService.enqueueReindex.mockResolvedValue('job-123');
       const result = await controller.reindex({ fromLedger: 500 }, adminReq() as unknown as Request);
-      expect(result).toEqual({ jobId: 'job-123', fromLedger: 500, status: 'queued' });
-      expect(mockAdminService.enqueueReindex).toHaveBeenCalledWith(500);
+      expect(result).toEqual({
+        jobId: 'job-123',
+        fromLedger: 500,
+        network: 'testnet',
+        status: 'queued',
+      });
+      expect(mockAdminService.enqueueReindex).toHaveBeenCalledWith(500, 'testnet');
       expect(mockAuditService.write).toHaveBeenCalledWith(
-        expect.objectContaining({ actor: 'GADMIN', action: 'reindex', payload: expect.objectContaining({ fromLedger: 500 }) }),
+        expect.objectContaining({
+          actor: 'GADMIN',
+          action: 'reindex',
+          payload: expect.objectContaining({ fromLedger: 500, network: 'testnet' }),
+        }),
       );
+    });
+
+    it('passes explicit network to enqueue', async () => {
+      mockAdminService.enqueueReindex.mockResolvedValue('job-456');
+      await controller.reindex(
+        { fromLedger: 100, network: 'public' },
+        adminReq() as unknown as Request,
+      );
+      expect(mockAdminService.enqueueReindex).toHaveBeenCalledWith(100, 'public');
     });
   });
 
