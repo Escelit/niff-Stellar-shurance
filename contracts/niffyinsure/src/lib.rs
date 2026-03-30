@@ -26,7 +26,7 @@ use soroban_sdk::{contract, contractevent, contractimpl, panic_with_error, Addre
 
 #[contract]
 pub struct NiffyInsure;
-pub use admin::AdminError;
+pub use admin::{AdminAction, AdminError, PendingAdminAction};
 pub use policy::{PolicyError, RenewalError};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -651,8 +651,28 @@ impl NiffyInsure {
         admin::cancel_admin(&env);
     }
 
-    pub fn set_token(env: Env, new_token: Address) {
+    /// Propose a high-risk admin action for two-step confirmation.
+    pub fn propose_admin_action(env: Env, action: AdminAction) {
+        admin::propose_admin_action(&env, action);
+    }
+
+    /// Confirm and execute pending admin action (second signer auth).
+    pub fn confirm_admin_action(env: Env) {
+        admin::confirm_admin_action(&env);
+    }
+
+    /// Cancel pending admin action (proposer auth).
+    pub fn cancel_admin_action(env: Env) {
+        admin::cancel_admin_action(&env);
+    }
+
+pub fn set_token(env: Env, new_token: Address) {
         admin::set_token(&env, new_token);
+    }
+
+    /// *** DEPRECATED single-step *** Use propose_admin_action(TreasuryRotation) for protected rotation.
+    pub fn set_treasury(env: Env, new_treasury: Address) {
+        admin::set_treasury(&env, new_treasury);
     }
 
     pub fn set_treasury(env: Env, new_treasury: Address) {

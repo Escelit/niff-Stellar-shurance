@@ -45,9 +45,13 @@ pub enum DataKey {
     Voters,
     ClaimCounter,
     Paused,
-    ActivePolicyCount(Address),
+    /// New: pending high-risk admin action
+    PendingAdminAction,
     /// Optional per-transaction cap for emergency sweep operations (i128).
     SweepCap,
+    /// Configurable ledger window for pending admin actions (default: 100 ledgers ~30min).
+    AdminActionWindowLedgers,
+    ActivePolicyCount(Address),
     /// Max total **paid** claim amount per policy per rolling ledger window (gross `claim.amount`).
     RollingClaimCap,
     /// Ledger length of each rolling window (bucket alignment uses current ledger sequence).
@@ -138,6 +142,56 @@ pub fn get_pending_admin(env: &Env) -> Option<Address> {
 
 pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
+}
+
+// ── New: Pending Admin Action ─────────────────────────────────────────────────
+
+pub fn has_pending_admin_action(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::PendingAdminAction)
+}
+
+pub fn set_pending_admin_action(env: &Env, pending: &crate::admin::PendingAdminAction) {
+    env.storage().instance().set(&DataKey::PendingAdminAction, pending);
+    env.storage().instance().bump_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+}
+
+pub fn get_pending_admin_action(env: &Env) -> Option<crate::admin::PendingAdminAction> {
+    env.storage().instance().get(&DataKey::PendingAdminAction)
+}
+
+pub fn clear_pending_admin_action(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingAdminAction);
+}
+
+/// Check expiry and auto-clear/emit if expired.
+/// Returns Some(pending) if valid, None if expired (caller should panic).
+pub fn check_and_clear_expired_admin_action(env: &Env) -> Option<crate::admin::PendingAdminAction> {
+    let pending_opt = get_pending_admin_action(env);
+    if let Some(pending) = pending_opt {
+        let now = env.ledger().sequence();
+        if now > pending.expiry_ledger {
+            clear_pending_admin_action(env);
+            crate::admin::AdminActionExpired {
+                proposer: pending.proposer.clone(),
+                action_id: now.saturating_sub(get_admin_action_window_ledgers(env)),
+                expiry_ledger: pending.expiry_ledger,
+                action: pending.action.clone(),
+            }
+            .publish(env);
+            None
+        } else {
+            Some(pending)
+        }
+    } else {
+        None
+    }
+}
+
+pub fn get_admin_action_window_ledgers(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::AdminActionWindowLedgers)
+        .unwrap_or(100u32)  // Default ~30min @ 5s/ledger
 }
 
 // ── Token (default asset) ─────────────────────────────────────────────────────
