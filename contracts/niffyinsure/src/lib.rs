@@ -92,6 +92,12 @@ impl NiffyInsure {
         storage::get_admin(&env)
     }
 
+    /// Returns the semver version string stamped at build time from `Cargo.toml`.
+    /// Read-only: no storage access, no auth required. Safe to call via simulation.
+    pub fn version(env: Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
     /// Read-only: balance of the default payout token held by this contract (payout reserve).
     /// Matches funds available for `process_claim` for the configured default asset.
     pub fn get_treasury_balance(env: Env) -> i128 {
