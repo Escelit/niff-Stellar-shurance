@@ -34,7 +34,8 @@
     "error-catalog:export": "ts-node scripts/export-error-catalog.ts",
     "env:example:generate": "ts-node scripts/generate-env-example.ts",
     "env:example:check": "ts-node scripts/check-env-example.ts",
-    "secrets:generate:jwt": "ts-node scripts/generate-jwt-key.ts"
+    "secrets:generate:jwt": "ts-node scripts/generate-jwt-key.ts",
+    "ops:replay-indexer": "ts-node scripts/replay-indexer.ts"
   },
   "dependencies": {
     "@apollo/server": "^4.13.0",
