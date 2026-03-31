@@ -14,6 +14,8 @@ interface DraftWrapper<T> {
 /**
  * Persists form state to localStorage with a TTL and schema versioning.
  * Filters out non-serializable objects (like File or IPFS blobs).
+ * 
+ * Note: Drafts are device-local and are NOT synced across sessions or devices.
  *
  * @param formKey Unique key for storage
  * @param schemaVersion Version of the form schema (mismatches clear draft)
@@ -63,24 +65,31 @@ export function useDraftPersistence<T extends Record<string, any>>(
    */
   const sanitize = useCallback((data: T): T => {
     const cleanData = { ...data };
-    
     // According to requirements: "Never persist file objects or IPFS URLs in drafts; only persist text fields."
     Object.keys(cleanData).forEach((key) => {
       const value = cleanData[key];
       
-      // Remove File objects or arrays of Files
-      if (value instanceof File || (Array.isArray(value) && value[0] instanceof File)) {
+      // Robust Check for File objects (works in environments where File may not be defined globally)
+      const isFile = (v: any) => 
+        v?.constructor?.name === 'File' || 
+        v?.constructor?.name === 'Blob' ||
+        (typeof File !== 'undefined' && v instanceof File) ||
+        (typeof Blob !== 'undefined' && v instanceof Blob);
+
+      if (isFile(value) || (Array.isArray(value) && value.some(isFile))) {
         delete cleanData[key];
+        return;
       }
       
       // Remove IPFS-like URLs or evidence fields if they contain them
       // In this specific app, EvidenceStep uses objects with 'url'
       if (key === 'evidence' && Array.isArray(value)) {
         delete cleanData[key];
+        return;
       }
       
       // Remove raw IPFS URLs if detected in strings
-      if (typeof value === 'string' && (value.includes('ipfs://') || value.includes('/ipfs/'))) {
+      if (typeof value === 'string' && (value.toLowerCase().includes('ipfs://') || value.toLowerCase().includes('/ipfs/'))) {
         delete cleanData[key];
       }
     });
