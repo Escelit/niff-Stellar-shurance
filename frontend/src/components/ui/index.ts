@@ -47,6 +47,7 @@ export {
   CardContent,
 } from './card'
 export { Badge, badgeVariants } from './badge'
+export { StatusBadge, type StatusBadgeProps, type InsuranceStatus } from './status-badge'
 export { WalletAddress, type WalletAddressProps, type StellarNetwork } from './wallet-address'
 export { Stepper, StepContent, type Step } from './stepper'
 export { InlineError } from './inline-error'
