@@ -52,25 +52,13 @@ export class MetricsService implements OnModuleInit {
   /** Number of requests waiting for a free connection. */
   readonly dbPoolWaiting: client.Gauge<string>;
 
-  // ── Horizon rate limit metrics ─────────────────────────────────────────────
-  readonly horizonRateLimitTokensRemaining: client.Gauge<string>;
-  readonly horizonRateLimitQueueDepth: client.Gauge<string>;
-  readonly horizonRateLimitRequestsTotal: client.Counter<string>;
-  readonly horizonRateLimitAllowedRequestsTotal: client.Counter<string>;
-  readonly horizonRateLimitRejectedRequestsTotal: client.Counter<string>;
-  readonly horizonRateLimitQueuedRequestsTotal: client.Counter<string>;
-  readonly horizonRateLimitAverageWaitTime: client.Histogram<string>;
-
-  // ── Reindex worker metrics ───────────────────────────────────────────────
-  readonly reindexJobsTotal: client.Counter<string>;
-  readonly reindexJobsCompleted: client.Counter<string>;
-  readonly reindexJobsFailed: client.Counter<string>;
-  readonly reindexActiveJobs: client.Gauge<string>;
-  readonly reindexProgressLedger: client.Gauge<string>;
-  readonly reindexEventsProcessed: client.Counter<string>;
-  readonly reindexProcessingTime: client.Histogram<string>;
-  readonly reindexCircuitBreakerOpen: client.Gauge<string>;
-  readonly reindexBatchSize: client.Histogram<string>;
+  // ── Redis cache metrics ───────────────────────────────────────────────────
+  /** Total cache hits by key namespace (policy, claim, idempotency, …). */
+  readonly redisCacheHits: client.Counter<string>;
+  /** Total cache misses by key namespace. */
+  readonly redisCacheMisses: client.Counter<string>;
+  /** Total Redis connection errors. */
+  readonly redisConnectionErrors: client.Counter<string>;
 
   constructor() {
     this.registry = new client.Registry();
@@ -206,107 +194,23 @@ export class MetricsService implements OnModuleInit {
       registers: [this.registry],
     });
 
-    // Horizon rate limit metrics
-    this.horizonRateLimitTokensRemaining = new client.Gauge({
-      name: 'horizon_rate_limit_tokens_remaining',
-      help: 'Number of tokens remaining in Horizon rate limit bucket',
-      labelNames: ['identifier'],
+    this.redisCacheHits = new client.Counter({
+      name: 'redis_cache_hits_total',
+      help: 'Total Redis cache hits by key namespace',
+      labelNames: ['namespace'],
       registers: [this.registry],
     });
 
-    this.horizonRateLimitQueueDepth = new client.Gauge({
-      name: 'horizon_rate_limit_queue_depth',
-      help: 'Number of requests currently queued for Horizon API',
+    this.redisCacheMisses = new client.Counter({
+      name: 'redis_cache_misses_total',
+      help: 'Total Redis cache misses by key namespace',
+      labelNames: ['namespace'],
       registers: [this.registry],
     });
 
-    this.horizonRateLimitRequestsTotal = new client.Counter({
-      name: 'horizon_rate_limit_requests_total',
-      help: 'Total Horizon API requests attempted',
-      registers: [this.registry],
-    });
-
-    this.horizonRateLimitAllowedRequestsTotal = new client.Counter({
-      name: 'horizon_rate_limit_allowed_requests_total',
-      help: 'Total Horizon API requests allowed by rate limiter',
-      registers: [this.registry],
-    });
-
-    this.horizonRateLimitRejectedRequestsTotal = new client.Counter({
-      name: 'horizon_rate_limit_rejected_requests_total',
-      help: 'Total Horizon API requests rejected by rate limiter',
-      registers: [this.registry],
-    });
-
-    this.horizonRateLimitQueuedRequestsTotal = new client.Counter({
-      name: 'horizon_rate_limit_queued_requests_total',
-      help: 'Total Horizon API requests queued due to rate limiting',
-      registers: [this.registry],
-    });
-
-    this.horizonRateLimitAverageWaitTime = new client.Histogram({
-      name: 'horizon_rate_limit_wait_time_seconds',
-      help: 'Time spent waiting for Horizon rate limit',
-      buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
-      registers: [this.registry],
-    });
-
-    // Reindex worker metrics
-    this.reindexJobsTotal = new client.Counter({
-      name: 'reindex_jobs_total',
-      help: 'Total reindex jobs started',
-      registers: [this.registry],
-    });
-
-    this.reindexJobsCompleted = new client.Counter({
-      name: 'reindex_jobs_completed_total',
-      help: 'Total reindex jobs completed successfully',
-      registers: [this.registry],
-    });
-
-    this.reindexJobsFailed = new client.Counter({
-      name: 'reindex_jobs_failed_total',
-      help: 'Total reindex jobs that failed',
-      registers: [this.registry],
-    });
-
-    this.reindexActiveJobs = new client.Gauge({
-      name: 'reindex_active_jobs',
-      help: 'Number of currently active reindex jobs',
-      registers: [this.registry],
-    });
-
-    this.reindexProgressLedger = new client.Gauge({
-      name: 'reindex_progress_ledger',
-      help: 'Current ledger position of active reindex jobs',
-      labelNames: ['job_id', 'network'],
-      registers: [this.registry],
-    });
-
-    this.reindexEventsProcessed = new client.Counter({
-      name: 'reindex_events_processed_total',
-      help: 'Total events processed during reindexing',
-      registers: [this.registry],
-    });
-
-    this.reindexProcessingTime = new client.Histogram({
-      name: 'reindex_processing_time_seconds',
-      help: 'Time taken to process reindex jobs',
-      buckets: [1, 5, 10, 30, 60, 300, 900, 3600],
-      registers: [this.registry],
-    });
-
-    this.reindexCircuitBreakerOpen = new client.Gauge({
-      name: 'reindex_circuit_breaker_open',
-      help: 'Circuit breaker status for reindex workers',
-      labelNames: ['network'],
-      registers: [this.registry],
-    });
-
-    this.reindexBatchSize = new client.Histogram({
-      name: 'reindex_batch_size',
-      help: 'Size of reindex processing batches',
-      buckets: [10, 50, 100, 500, 1000, 5000],
+    this.redisConnectionErrors = new client.Counter({
+      name: 'redis_connection_errors_total',
+      help: 'Total Redis connection errors',
       registers: [this.registry],
     });
   }
@@ -404,72 +308,16 @@ export class MetricsService implements OnModuleInit {
     this.dbPoolWaiting.set(opts.waiting);
   }
 
-  // Horizon rate limit metrics methods
-  recordHorizonRateLimitTokensRemaining(opts: { identifier: string; tokens: number }) {
-    this.horizonRateLimitTokensRemaining.set({ identifier: opts.identifier }, opts.tokens);
+  recordRedisCache(result: 'hit' | 'miss', namespace: string) {
+    if (result === 'hit') {
+      this.redisCacheHits.inc({ namespace });
+    } else {
+      this.redisCacheMisses.inc({ namespace });
+    }
   }
 
-  recordHorizonRateLimitQueueDepth(depth: number) {
-    this.horizonRateLimitQueueDepth.set(depth);
-  }
-
-  recordHorizonRateLimitRequest() {
-    this.horizonRateLimitRequestsTotal.inc();
-  }
-
-  recordHorizonRateLimitAllowed() {
-    this.horizonRateLimitAllowedRequestsTotal.inc();
-  }
-
-  recordHorizonRateLimitRejected() {
-    this.horizonRateLimitRejectedRequestsTotal.inc();
-  }
-
-  recordHorizonRateLimitQueued() {
-    this.horizonRateLimitQueuedRequestsTotal.inc();
-  }
-
-  recordHorizonRateLimitWaitTime(waitTimeMs: number) {
-    const waitTimeSec = waitTimeMs / 1000;
-    this.horizonRateLimitAverageWaitTime.observe(waitTimeSec);
-  }
-
-  // Reindex worker metrics methods
-  recordReindexJobStarted() {
-    this.reindexJobsTotal.inc();
-  }
-
-  recordReindexJobCompleted() {
-    this.reindexJobsCompleted.inc();
-  }
-
-  recordReindexJobFailed() {
-    this.reindexJobsFailed.inc();
-  }
-
-  recordReindexActiveJobs(count: number) {
-    this.reindexActiveJobs.set(count);
-  }
-
-  recordReindexProgress(jobId: string, network: string, currentLedger: number) {
-    this.reindexProgressLedger.set({ job_id: jobId, network }, currentLedger);
-  }
-
-  recordReindexEventsProcessed(count: number) {
-    this.reindexEventsProcessed.inc(count);
-  }
-
-  recordReindexProcessingTime(durationMs: number) {
-    const durationSec = durationMs / 1000;
-    this.reindexProcessingTime.observe(durationSec);
-  }
-
-  recordReindexCircuitBreakerState(network: string, isOpen: boolean) {
-    this.reindexCircuitBreakerOpen.set({ network }, isOpen ? 1 : 0);
-  }
-
-  recordReindexBatchSize(batchSize: number) {
-    this.reindexBatchSize.observe(batchSize);
+  recordRedisConnectionError() {
+    this.redisConnectionErrors.inc();
   }
 
   async getMetrics(): Promise<string> {
