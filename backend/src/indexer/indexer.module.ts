@@ -8,6 +8,7 @@ import { ReconciliationService } from './reconciliation.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { RpcModule } from '../rpc/rpc.module';
 import { QuoteModule } from '../quote/quote.module';
+import { MetricsModule } from '../metrics/metrics.module';
 
 @Module({
   imports: [PrismaModule, RpcModule, ConfigModule, ScheduleModule.forFeature()],
