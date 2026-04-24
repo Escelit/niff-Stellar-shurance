@@ -245,6 +245,9 @@ pub fn map_quote_error(env: &Env, err: Error) -> QuoteFailure {
         Error::NonceMismatch => {
             "nonce mismatch: read current nonce via get_nonce(holder) and retry"
         },
+        Error::ClaimNotProcessing => {
+            "claim is not in Processing status; process_deadline requires Processing"
+        },
     };
     QuoteFailure {
         code: err as u32,

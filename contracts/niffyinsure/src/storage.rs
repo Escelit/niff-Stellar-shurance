@@ -173,7 +173,7 @@ pub fn has_pending_admin_action(env: &Env) -> bool {
 
 pub fn set_pending_admin_action(env: &Env, pending: &crate::admin::PendingAdminAction) {
     env.storage().instance().set(&DataKey::PendingAdminAction, pending);
-    env.storage().instance().bump_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    env.storage().instance().extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
 }
 
 pub fn get_pending_admin_action(env: &Env) -> Option<crate::admin::PendingAdminAction> {
