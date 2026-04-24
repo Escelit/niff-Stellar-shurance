@@ -171,6 +171,7 @@ impl NiffyInsure {
             49 => validate::Error::VotingDurationOutOfBounds,
             51 => validate::Error::VoterSnapshotExpired,
             52 => validate::Error::NonceMismatch,
+            53 => validate::Error::ClaimNotProcessing,
             _ => validate::Error::ClaimNotApproved,
         };
         policy::map_quote_error(&env, err)

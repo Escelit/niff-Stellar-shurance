@@ -95,6 +95,10 @@ pub enum DataKey {
     /// Per-holder replay-protection nonce. Incremented on each successful mutating call
     /// when the caller supplies `expected_nonce`. Supplementary to Stellar sequence numbers.
     HolderNonce(Address),
+    /// Per-policy rolling claim window state (window_start + cumulative_paid).
+    RollingClaimState(Address, u32),
+    /// Last `end_ledger` for which a `PolicyExpired` event was emitted for this policy term.
+    PolicyExpiredEventEndLedger(Address, u32),
 }
 
 // ── Instance bump ─────────────────────────────────────────────────────────────
@@ -155,7 +159,7 @@ pub fn has_pending_admin_action(env: &Env) -> bool {
 
 pub fn set_pending_admin_action(env: &Env, pending: &crate::admin::PendingAdminAction) {
     env.storage().instance().set(&DataKey::PendingAdminAction, pending);
-    env.storage().instance().bump_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    env.storage().instance().extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
 }
 
 pub fn get_pending_admin_action(env: &Env) -> Option<crate::admin::PendingAdminAction> {

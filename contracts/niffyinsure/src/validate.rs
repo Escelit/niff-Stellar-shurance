@@ -63,6 +63,8 @@ pub enum Error {
     /// Supplied `expected_nonce` does not match the holder's current on-chain nonce.
     /// Read the current value via `get_nonce(holder)` before retrying.
     NonceMismatch = 52,
+    /// `process_deadline` called on a claim that is not in `Processing` status.
+    ClaimNotProcessing = 53,
 }
 
 pub fn validate_quorum_bps(bps: u32) -> Result<(), Error> {
