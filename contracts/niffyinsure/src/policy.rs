@@ -245,6 +245,9 @@ pub fn map_quote_error(env: &Env, err: Error) -> QuoteFailure {
         Error::NonceMismatch => {
             "nonce mismatch: read current nonce via get_nonce(holder) and retry"
         },
+        Error::RollingClaimCapExceeded => {
+            "rolling claim cap exceeded: cumulative paid claims for this policy in the current window exceed the cap"
+        },
     };
     QuoteFailure {
         code: err as u32,

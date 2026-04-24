@@ -63,6 +63,9 @@ pub enum Error {
     /// Supplied `expected_nonce` does not match the holder's current on-chain nonce.
     /// Read the current value via `get_nonce(holder)` before retrying.
     NonceMismatch = 52,
+    /// Cumulative paid claims for this policy in the current rolling window exceed the cap.
+    /// Wait for the window to roll over or reduce the claim amount.
+    RollingClaimCapExceeded = 53,
 }
 
 pub fn validate_quorum_bps(bps: u32) -> Result<(), Error> {

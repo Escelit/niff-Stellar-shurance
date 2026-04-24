@@ -95,6 +95,12 @@ pub enum DataKey {
     /// Per-holder replay-protection nonce. Incremented on each successful mutating call
     /// when the caller supplies `expected_nonce`. Supplementary to Stellar sequence numbers.
     HolderNonce(Address),
+    /// Per-policy rolling claim window accumulator (persistent).
+    /// Key: (holder, policy_id) → RollingClaimWindowState.
+    RollingClaimState(Address, u32),
+    /// Last `end_ledger` for which a `PolicyExpired` event was emitted for this policy term.
+    /// Prevents duplicate expiry events across keeper calls.
+    PolicyExpiredEventEndLedger(Address, u32),
 }
 
 // ── Instance bump ─────────────────────────────────────────────────────────────
