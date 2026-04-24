@@ -169,6 +169,7 @@ impl NiffyInsure {
             41 => validate::Error::NotEligibleVoter,
             42 => validate::Error::RateLimitExceeded,
             49 => validate::Error::VotingDurationOutOfBounds,
+            50 => validate::Error::PolicyBatchTooLarge,
             51 => validate::Error::VoterSnapshotExpired,
             52 => validate::Error::NonceMismatch,
             _ => validate::Error::ClaimNotApproved,
@@ -518,7 +519,7 @@ impl NiffyInsure {
     /// Matches [`types::PAGE_SIZE_MAX`]: each entry is an independent storage read, so
     /// large batches multiply metered reads and can exceed the default Soroban
     /// instruction budget during simulation. Dashboards and indexers must chunk
-    /// requests. **More than 20 keys reverts** with [`validate::Error::VotingDurationOutOfBounds`]
+    /// requests. **More than 20 keys reverts** with [`validate::Error::PolicyBatchTooLarge`]
     /// (unlike `list_policies`, which clamps `limit` instead of erroring).
     ///
     /// The cap is checked **before** any policy storage access (no unbounded iteration).
@@ -527,7 +528,7 @@ impl NiffyInsure {
         ids: Vec<types::PolicyLookupKey>,
     ) -> Vec<Option<types::Policy>> {
         if ids.len() > types::POLICY_BATCH_GET_MAX {
-            panic_with_error!(&env, validate::Error::VotingDurationOutOfBounds);
+            panic_with_error!(&env, validate::Error::PolicyBatchTooLarge);
         }
         let mut out: Vec<Option<types::Policy>> = Vec::new(&env);
         for i in 0..ids.len() {
