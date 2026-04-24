@@ -656,8 +656,9 @@ impl NiffyInsure {
     }
 
     /// Confirm and execute pending admin action (second signer auth).
-    pub fn confirm_admin_action(env: Env) {
-        admin::confirm_admin_action(&env);
+    pub fn confirm_admin_action(env: Env, confirmer: Address) {
+        confirmer.require_auth();
+        admin::confirm_admin_action(&env, confirmer);
     }
 
     /// Cancel pending admin action (proposer auth).
