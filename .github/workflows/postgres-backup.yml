@@ -70,7 +70,7 @@ jobs:
       RESTORE_MAX_ROW_COUNT_DELTA: ${{ vars.BACKUP_RESTORE_MAX_ROW_COUNT_DELTA || '0' }}
       BACKUP_KMS_KEY_ID: ${{ secrets.BACKUP_KMS_KEY_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate backup configuration
         run: |

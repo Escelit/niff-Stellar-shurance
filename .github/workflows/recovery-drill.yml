@@ -88,7 +88,7 @@ jobs:
       DRILL_REINDEX_FROM_LEDGER: ${{ github.event.inputs.from_ledger || vars.DRILL_REINDEX_FROM_LEDGER }}
       CREATE_DRILL_TICKET: ${{ github.event_name == 'schedule' || github.event.inputs.create_ticket == 'true' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate drill configuration
         run: |
