@@ -66,7 +66,7 @@
 // or deadline-plurality approval, which is controlled by the DAO snapshot, not
 // the admin. The admin cannot flip a `Rejected` claim to `Approved`.
 use crate::{
-    ledger, rolling_claim_cap, storage,
+    ledger, storage,
     types::{
         Claim, ClaimEvidenceEntry, ClaimProcessed, ClaimStatus, ClaimStatusHistoryEntry,
         TerminationReason, VoteOption, CLAIM_STATUS_HISTORY_MAX, STRIKE_DEACTIVATION_THRESHOLD,
@@ -292,9 +292,7 @@ pub fn file_claim(
     let deductible_snapshot = policy.deductible.unwrap_or(0);
 
     let duration = storage::get_voting_duration_ledgers(env);
-    let voting_deadline_ledger = now
-        .checked_add(duration)
-        .ok_or(Error::Overflow)?;
+    let voting_deadline_ledger = now.checked_add(duration).ok_or(Error::Overflow)?;
 
     let claim_id = storage::next_claim_id(env);
     let mut status_history: Vec<ClaimStatusHistoryEntry> = Vec::new(env);
@@ -333,22 +331,13 @@ pub fn file_claim(
         evidence_hashes.push_back(e.hash.clone());
     }
 
-    // Stable fingerprint: XOR-fold the first 8 bytes of each evidence hash.
-    let image_hash: u64 = evidence_hashes.iter().fold(0u64, |acc, h| {
-        let mut v = 0u64;
-        for i in 0u32..8u32 {
-            v = (v << 8) | (h.get(i).unwrap_or(0) as u64);
-        }
-        acc ^ v
-    });
-
     ClaimFiled {
         claim_id,
         holder: holder.clone(),
         policy_id,
         claim_amount: amount,
         deductible: deductible_snapshot,
-        image_hash,
+        evidence_hashes,
     }
     .publish(env);
 
@@ -474,7 +463,8 @@ pub fn vote_on_claim(
         let rejected = res == ClaimStatus::Rejected;
         claim.status = res;
         if rejected {
-            claim.appeal_open_deadline_ledger = now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
+            claim.appeal_open_deadline_ledger =
+                now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
         }
     }
 
@@ -547,7 +537,8 @@ fn finalize_claim_inner(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> 
             claim.status = ClaimStatus::Approved;
         } else {
             claim.status = ClaimStatus::Rejected;
-            claim.appeal_open_deadline_ledger = now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
+            claim.appeal_open_deadline_ledger =
+                now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
         }
     } else {
         // Below minimum participation — no quorum (insurer-favored default).
@@ -740,9 +731,7 @@ fn payout(env: &Env, claim: &Claim) -> Result<(), Error> {
 
     let gross = claim.amount;
     let deductible = claim.deductible;
-    let net = gross
-        .checked_sub(deductible)
-        .ok_or(Error::Overflow)?;
+    let net = gross.checked_sub(deductible).ok_or(Error::Overflow)?;
     if net <= 0 {
         // Enum size capped by Soroban; reuse ClaimAmountZero for "no positive payout after deductible".
         return Err(Error::ClaimAmountZero);
@@ -794,9 +783,9 @@ pub fn set_allowed_asset(env: &Env, asset: &Address, allowed: bool) {
 
 #[cfg(test)]
 mod evidence_hash_tests {
+    use crate::types::ClaimEvidenceEntry;
     use crate::validate::{check_claim_fields, Error};
     use soroban_sdk::{Bytes, BytesN, Env, String, Vec};
-    use crate::types::ClaimEvidenceEntry;
 
     fn make_hash(env: &Env, fill: u8) -> BytesN<32> {
         let mut b = [fill; 32];
@@ -804,7 +793,10 @@ mod evidence_hash_tests {
     }
 
     fn make_url(env: &Env) -> String {
-        String::from_str(env, "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+        String::from_str(
+            env,
+            "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+        )
     }
 
     fn make_details(env: &Env) -> String {
@@ -819,8 +811,7 @@ mod evidence_hash_tests {
             url: make_url(&env),
             hash: make_hash(&env, 0x00),
         });
-        let err = check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence)
-            .unwrap_err();
+        let err = check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence).unwrap_err();
         assert_eq!(err, Error::ExcessiveEvidenceBytes);
     }
 
@@ -847,8 +838,7 @@ mod evidence_hash_tests {
             url: make_url(&env),
             hash: make_hash(&env, 0x00),
         });
-        let err = check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence)
-            .unwrap_err();
+        let err = check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence).unwrap_err();
         assert_eq!(err, Error::ExcessiveEvidenceBytes);
     }
 
