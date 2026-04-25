@@ -1,52 +1,43 @@
 'use client';
 
-import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState } from '@/components/ui/empty-state';
+import { SkeletonRow, SkeletonCard } from '@/components/ui/skeleton';
 
 export function PolicyListSkeleton({ rows = 5, layout = 'row' }: { rows?: number; layout?: 'row' | 'card' }) {
   if (layout === 'card') {
     return (
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
         {Array.from({ length: rows }).map((_, i) => (
-          <div key={i} className="rounded-lg border border-gray-200 p-4 space-y-3">
-            <Skeleton className="h-5 w-24" />
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-3/4" />
-            <Skeleton className="h-9 w-full" />
-          </div>
+          <SkeletonCard key={i} />
         ))}
       </div>
     );
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-0" aria-hidden="true">
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="flex gap-4 px-4 py-3 border-b border-gray-100">
-          <Skeleton className="h-5 w-16" />
-          <Skeleton className="h-5 w-14" />
-          <Skeleton className="h-5 w-24 ml-auto" />
-          <Skeleton className="h-5 w-24" />
-          <Skeleton className="h-5 w-20" />
-          <Skeleton className="h-9 w-32" />
-        </div>
+        <SkeletonRow key={i} className="border-b border-gray-100" />
       ))}
     </div>
   );
 }
 
-interface EmptyStateProps {
+interface PolicyEmptyStateProps {
   filter: 'active' | 'expired' | 'all';
 }
 
-export function PolicyEmptyState({ filter }: EmptyStateProps) {
-  const messages: Record<typeof filter, { heading: string; body: string }> = {
+export function PolicyEmptyState({ filter }: PolicyEmptyStateProps) {
+  const messages: Record<typeof filter, { heading: string; body: string; cta?: boolean }> = {
     all: {
       heading: "You don't have any policies yet",
       body: "Get a quote to start your first coverage on the Stellar network.",
+      cta: true,
     },
     active: {
       heading: "No active policies",
       body: "All your policies have expired, or you haven't purchased one yet.",
+      cta: true,
     },
     expired: {
       heading: "No expired policies",
@@ -54,22 +45,16 @@ export function PolicyEmptyState({ filter }: EmptyStateProps) {
     },
   };
 
-  const { heading, body } = messages[filter];
+  const { heading, body, cta } = messages[filter];
 
   return (
-    <div className="flex flex-col items-center justify-center py-16 text-center gap-3">
-      <span className="text-4xl" aria-hidden="true">📋</span>
-      <h2 className="text-lg font-semibold text-gray-900">{heading}</h2>
-      <p className="text-sm text-gray-500 max-w-xs">{body}</p>
-      {filter !== 'expired' && (
-        <a
-          href="/quote"
-          className="mt-2 inline-flex items-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[44px]"
-        >
-          Get a quote
-        </a>
-      )}
-    </div>
+    <EmptyState
+      variant="policies"
+      headline={heading}
+      description={body}
+      ctaLabel={cta ? 'Get your first quote' : undefined}
+      ctaHref={cta ? '/quote' : undefined}
+    />
   );
 }
 

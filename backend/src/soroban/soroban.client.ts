@@ -21,6 +21,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { rpc as SorobanRpc } from '@stellar/stellar-sdk';
 import { config } from '../config/env';
+import { getRuntimeEnv } from '../config/runtime-env';
 import { AppError } from '../middleware/errorHandler';
 
 // Convenience aliases
@@ -211,7 +212,7 @@ export async function simulateGeneratePremium(args: {
  * resource footprints.  Returns the base64 XDR for wallet signing.
  *
  * Argument ordering matches on-chain initiate_policy: holder, policy_type, region,
- * age_band, coverage_tier, safety_score, base_amount, asset, beneficiary.
+ * age_band, coverage_tier, safety_score, base_amount, asset, beneficiary, deductible.
  *
  * Multisig: `authRequirements` lists all addresses that must sign the Soroban
  * auth entries before submission. Display these to the user before the wallet popup.
@@ -229,6 +230,8 @@ export async function buildInitiatePolicyTransaction(args: {
   baseAmount: bigint;
   asset?: string;
   beneficiary?: string;
+  /** Optional per-claim deductible (stroops), same asset as premium/payout. */
+  deductible?: bigint | null;
 }): Promise<BuildTransactionResult> {
   const server = makeServer();
   const account = await loadAccount(server, args.holder);
@@ -236,7 +239,7 @@ export async function buildInitiatePolicyTransaction(args: {
   const ledgerInfo = await server.getLatestLedger();
 
   // Resolve asset: use caller-supplied address or fall back to configured default.
-  const assetAddress = args.asset ?? process.env.DEFAULT_TOKEN_CONTRACT_ID ?? '';
+  const assetAddress = args.asset ?? getRuntimeEnv().DEFAULT_TOKEN_CONTRACT_ID;
 
   const beneficiaryScv =
     args.beneficiary == null || args.beneficiary === ''
@@ -244,6 +247,14 @@ export async function buildInitiatePolicyTransaction(args: {
       : nativeToScVal(new Address(args.beneficiary), {
           type: 'option',
           innerType: 'address',
+        } as { type: string; innerType: string });
+
+  const deductibleScv =
+    args.deductible == null || args.deductible === undefined
+      ? nativeToScVal(null)
+      : nativeToScVal(args.deductible, {
+          type: 'option',
+          innerType: 'i128',
         } as { type: string; innerType: string });
 
   const scArgs = [
@@ -256,6 +267,7 @@ export async function buildInitiatePolicyTransaction(args: {
     nativeToScVal(args.baseAmount, { type: 'i128' }),
     new Address(assetAddress).toScVal(),
     beneficiaryScv,
+    deductibleScv,
   ];
 
   const contract = new Contract(config.stellar.contractId);

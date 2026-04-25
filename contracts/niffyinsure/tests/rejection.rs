@@ -32,13 +32,15 @@
 
 #![cfg(test)]
 
+mod common;
+
 use niffyinsure::{
     types::{ClaimStatus, TerminationReason, VoteOption, STRIKE_DEACTIVATION_THRESHOLD},
     NiffyInsureClient,
 };
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env, String,
+    Address, Env, String,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -62,8 +64,8 @@ fn seed(client: &NiffyInsureClient, holder: &Address, coverage: i128, end_ledger
 
 fn file(client: &NiffyInsureClient, holder: &Address, amount: i128, env: &Env) -> u64 {
     let details = String::from_str(env, "brief claim description");
-    let urls = vec![env];
-    client.file_claim(holder, &1u32, &amount, &details, &urls)
+    let ev = common::empty_evidence(env);
+    client.file_claim(holder, &1u32, &amount, &details, &ev, &None)
 }
 
 /// Three-voter setup: 2-of-3 majority for approve or reject.
@@ -239,7 +241,8 @@ fn rejection_clears_open_claim_flag() {
         &1u32,
         &100_000,
         &String::from_str(&env, "second claim"),
-        &vec![&env],
+        &common::empty_evidence(&env),
+        &None,
     );
     // Accept either Ok (filed) or Err (any reason except DuplicateOpenClaim).
     // The important check is that DuplicateOpenClaim is not returned.
@@ -258,16 +261,16 @@ fn rejection_clears_open_claim_flag() {
 #[test]
 fn deadline_reject_increments_strike_count() {
     let (env, client, v1, v2, _v3) = three_voter_setup();
+    // Full turnout required so 1–1 split stays open until `finalize_claim`.
+    client.admin_set_quorum_bps(&10_000u32);
     let cid = file(&client, &v1, 100_000, &env);
-    // 1 approve, 1 reject → no majority; deadline decides
     client.vote_on_claim(&v1, &cid, &VoteOption::Approve);
-    client.vote_on_claim(&v2, &cid, &VoteOption::Reject);
 
     let claim = client.get_claim(&cid);
     env.ledger()
         .with_mut(|l| l.sequence_number = claim.voting_deadline_ledger + 1);
 
-    // Tie resolves to Rejected (insurer wins tie)
+    // Participation below snapshot quorum → Rejected at deadline
     client.finalize_claim(&cid);
     assert_eq!(client.get_claim(&cid).status, ClaimStatus::Rejected);
 
@@ -282,19 +285,17 @@ fn deadline_reject_increments_strike_count() {
 #[test]
 fn tie_resolves_to_rejected_and_increments_strike() {
     let (env, client, _, _) = setup();
+    client.admin_set_quorum_bps(&10_000u32);
     let v1 = Address::generate(&env);
     let v2 = Address::generate(&env);
+    let v3 = Address::generate(&env);
     seed(&client, &v1, 1_000_000, 500_000);
     seed(&client, &v2, 1_000_000, 500_000);
+    seed(&client, &v3, 1_000_000, 500_000);
 
     let cid = file(&client, &v1, 100_000, &env);
     client.vote_on_claim(&v1, &cid, &VoteOption::Approve);
     client.vote_on_claim(&v2, &cid, &VoteOption::Reject);
-
-    let claim = client.get_claim(&cid);
-    env.ledger()
-        .with_mut(|l| l.sequence_number = claim.voting_deadline_ledger + 1);
-    client.finalize_claim(&cid);
 
     assert_eq!(client.get_claim(&cid).status, ClaimStatus::Rejected);
     let policy = client.get_policy(&v1, &1u32).expect("policy must exist");
@@ -352,10 +353,10 @@ fn multiple_rejections_accumulate_strike_count() {
     seed(&client, &voter_b, 1_000_000, 500_000);
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     // First rejection
-    let cid1 = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let cid1 = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     client.vote_on_claim(&voter_a, &cid1, &VoteOption::Reject);
     client.vote_on_claim(&voter_b, &cid1, &VoteOption::Reject);
     assert_eq!(client.get_claim(&cid1).status, ClaimStatus::Rejected);
@@ -367,7 +368,7 @@ fn multiple_rejections_accumulate_strike_count() {
     });
 
     // Second rejection
-    let cid2 = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let cid2 = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     client.vote_on_claim(&voter_a, &cid2, &VoteOption::Reject);
     client.vote_on_claim(&voter_b, &cid2, &VoteOption::Reject);
     assert_eq!(client.get_claim(&cid2).status, ClaimStatus::Rejected);
@@ -389,7 +390,7 @@ fn strike_threshold_deactivates_policy() {
     seed(&client, &voter_b, 1_000_000, 5_000_000);
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     for strike in 1..=STRIKE_DEACTIVATION_THRESHOLD {
         // Advance past rate-limit for all but the first claim
@@ -398,7 +399,7 @@ fn strike_threshold_deactivates_policy() {
                 l.sequence_number += niffyinsure::types::RATE_LIMIT_WINDOW_LEDGERS + 1;
             });
         }
-        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
         client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
         client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
         assert_eq!(client.get_claim(&cid).status, ClaimStatus::Rejected);
@@ -450,7 +451,7 @@ fn deactivated_policy_blocks_new_claims() {
     seed(&client, &voter_b, 1_000_000, 5_000_000);
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     // Exhaust strikes to trigger deactivation
     for strike in 1..=STRIKE_DEACTIVATION_THRESHOLD {
@@ -459,7 +460,7 @@ fn deactivated_policy_blocks_new_claims() {
                 l.sequence_number += niffyinsure::types::RATE_LIMIT_WINDOW_LEDGERS + 1;
             });
         }
-        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
         client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
         client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
     }
@@ -473,7 +474,7 @@ fn deactivated_policy_blocks_new_claims() {
     });
 
     // Further claims must be rejected
-    let result = client.try_file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let result = client.try_file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     assert!(
         result.is_err(),
         "file_claim must fail on a deactivated policy"
@@ -498,7 +499,7 @@ fn deactivated_policy_updates_voter_registry() {
     assert!(client.voter_registry_contains(&holder));
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     for strike in 1..=STRIKE_DEACTIVATION_THRESHOLD {
         if strike > 1 {
@@ -506,7 +507,7 @@ fn deactivated_policy_updates_voter_registry() {
                 l.sequence_number += niffyinsure::types::RATE_LIMIT_WINDOW_LEDGERS + 1;
             });
         }
-        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
         client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
         client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
     }
@@ -544,7 +545,7 @@ fn deactivated_policy_keeps_voter_if_other_policies_active() {
     // After two seeds the count is 2.
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     // Exhaust strikes on policy 1 to deactivate it
     for strike in 1..=STRIKE_DEACTIVATION_THRESHOLD {
@@ -553,7 +554,7 @@ fn deactivated_policy_keeps_voter_if_other_policies_active() {
                 l.sequence_number += niffyinsure::types::RATE_LIMIT_WINDOW_LEDGERS + 1;
             });
         }
-        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
         client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
         client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
     }
@@ -623,10 +624,10 @@ fn mixed_approve_then_reject_correct_strike_count() {
     seed(&client, &voter_b, 1_000_000, 5_000_000);
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     // First claim: approved
-    let cid1 = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let cid1 = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     client.vote_on_claim(&voter_a, &cid1, &VoteOption::Approve);
     client.vote_on_claim(&voter_b, &cid1, &VoteOption::Approve);
     assert_eq!(client.get_claim(&cid1).status, ClaimStatus::Approved);
@@ -642,7 +643,7 @@ fn mixed_approve_then_reject_correct_strike_count() {
     });
 
     // Second claim: rejected
-    let cid2 = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let cid2 = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     client.vote_on_claim(&voter_a, &cid2, &VoteOption::Reject);
     client.vote_on_claim(&voter_b, &cid2, &VoteOption::Reject);
     assert_eq!(client.get_claim(&cid2).status, ClaimStatus::Rejected);
@@ -665,10 +666,10 @@ fn reject_then_approve_leaves_policy_active_with_one_strike() {
     seed(&client, &voter_b, 1_000_000, 5_000_000);
 
     let details = String::from_str(&env, "claim");
-    let urls = vec![&env];
+    let ev = common::empty_evidence(&env);
 
     // First claim: rejected
-    let cid1 = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let cid1 = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     client.vote_on_claim(&voter_a, &cid1, &VoteOption::Reject);
     client.vote_on_claim(&voter_b, &cid1, &VoteOption::Reject);
     assert_eq!(client.get_policy(&holder, &1u32).unwrap().strike_count, 1);
@@ -678,7 +679,7 @@ fn reject_then_approve_leaves_policy_active_with_one_strike() {
     });
 
     // Second claim: approved
-    let cid2 = client.file_claim(&holder, &1u32, &100_000, &details, &urls);
+    let cid2 = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
     client.vote_on_claim(&voter_a, &cid2, &VoteOption::Approve);
     client.vote_on_claim(&voter_b, &cid2, &VoteOption::Approve);
     assert_eq!(client.get_claim(&cid2).status, ClaimStatus::Approved);
@@ -747,4 +748,193 @@ fn double_finalize_after_rejection_fails() {
     // Second finalize must fail (ClaimAlreadyTerminal)
     let result = client.try_finalize_claim(&cid);
     assert!(result.is_err(), "cannot finalize an already-terminal claim");
+}
+
+// ── Admin-terminated policy with in-flight claim ──────────────────────────────
+//
+// Governance risk: admin_terminate_policy with allow_open_claims = true can
+// terminate a policy while a claim is in Processing. The claim vote can still
+// complete, but on_reject must skip the deactivation branch (policy already
+// inactive) while still incrementing strike_count and emitting ClaimRejected
+// and StrikeIncremented for auditability.
+
+/// Admin terminates a policy while a claim is in Processing (allow_open_claims = true).
+/// After termination, the vote completes and rejection side-effects fire correctly:
+///   - ClaimRejected emitted
+///   - StrikeIncremented emitted (strike_count incremented even though policy is inactive)
+///   - PolicyDeactivated NOT emitted (policy already inactive)
+///   - process_claim returns ClaimNotApproved (no payout)
+#[test]
+fn admin_terminated_policy_in_flight_claim_rejection_side_effects() {
+    let (env, client, admin, _token) = setup();
+    let holder = Address::generate(&env);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+    seed(&client, &holder, 2_000_000, 5_000_000);
+    seed(&client, &voter_a, 1_000_000, 5_000_000);
+    seed(&client, &voter_b, 1_000_000, 5_000_000);
+
+    // File a claim while the policy is still active.
+    let cid = file(&client, &holder, 100_000, &env);
+    assert_eq!(client.get_claim(&cid).status, ClaimStatus::Processing);
+
+    // Admin terminates the policy with allow_open_claims = true (governance risk path).
+    client.admin_terminate_policy(
+        &admin,
+        &holder,
+        &1u32,
+        &niffyinsure::types::TerminationReason::AdminOverride,
+        &true,
+    );
+
+    // Policy is now inactive.
+    let policy_after_terminate = client.get_policy(&holder, &1u32).unwrap();
+    assert!(!policy_after_terminate.is_active, "policy must be inactive after admin termination");
+
+    // The in-flight claim can still be voted on and finalized.
+    client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
+    client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
+
+    // Claim is now Rejected.
+    assert_eq!(client.get_claim(&cid).status, ClaimStatus::Rejected);
+
+    // Strike count is incremented even though the policy is already inactive.
+    let policy = client.get_policy(&holder, &1u32).unwrap();
+    assert_eq!(
+        policy.strike_count, 1,
+        "strike_count must be incremented even when policy is already inactive"
+    );
+
+    // Policy remains inactive (no double-deactivation).
+    assert!(!policy.is_active, "policy must remain inactive after rejection side-effects");
+
+    // process_claim must fail — rejected claim never triggers payout.
+    let result = client.try_process_claim(&cid);
+    assert!(
+        result.is_err(),
+        "process_claim must return ClaimNotApproved for a rejected claim on a terminated policy"
+    );
+}
+
+/// Verify that on_reject skips PolicyDeactivated when the policy is already
+/// inactive (admin-terminated), even if strike_count reaches the threshold.
+#[test]
+fn on_reject_skips_deactivation_when_policy_already_inactive() {
+    let (env, client, admin, _token) = setup();
+    let holder = Address::generate(&env);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+    // Give holder enough end_ledger to file multiple claims.
+    seed(&client, &holder, 2_000_000, 5_000_000);
+    seed(&client, &voter_a, 1_000_000, 5_000_000);
+    seed(&client, &voter_b, 1_000_000, 5_000_000);
+
+    let details = soroban_sdk::String::from_str(&env, "claim");
+    let ev = common::empty_evidence(&env);
+
+    // File and reject claims up to threshold - 1 (policy still active).
+    for strike in 1..STRIKE_DEACTIVATION_THRESHOLD {
+        if strike > 1 {
+            env.ledger().with_mut(|l| {
+                l.sequence_number += niffyinsure::types::RATE_LIMIT_WINDOW_LEDGERS + 1;
+            });
+        }
+        let cid = client.file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
+        client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
+        client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
+    }
+
+    let policy_before = client.get_policy(&holder, &1u32).unwrap();
+    assert!(policy_before.is_active, "policy must still be active before threshold");
+    assert_eq!(policy_before.strike_count, STRIKE_DEACTIVATION_THRESHOLD - 1);
+
+    // Admin terminates the policy before the threshold-triggering rejection.
+    client.admin_terminate_policy(
+        &admin,
+        &holder,
+        &1u32,
+        &niffyinsure::types::TerminationReason::AdminOverride,
+        &true,
+    );
+    assert!(!client.get_policy(&holder, &1u32).unwrap().is_active);
+
+    // File one more claim (open_claims bypass was set, so this is allowed via
+    // the admin termination path — but the policy is inactive, so file_claim
+    // should fail with PolicyInactive).
+    env.ledger().with_mut(|l| {
+        l.sequence_number += niffyinsure::types::RATE_LIMIT_WINDOW_LEDGERS + 1;
+    });
+    let result = client.try_file_claim(&holder, &1u32, &100_000, &details, &ev, &None);
+    assert!(result.is_err(), "file_claim must fail on an inactive policy");
+
+    // Strike count remains at threshold - 1 (no new claim was filed).
+    let policy = client.get_policy(&holder, &1u32).unwrap();
+    assert_eq!(
+        policy.strike_count,
+        STRIKE_DEACTIVATION_THRESHOLD - 1,
+        "strike_count must not change when no new rejection occurred"
+    );
+    // Policy remains inactive (admin termination, not ExcessiveRejections).
+    assert!(!policy.is_active);
+    assert_eq!(
+        policy.termination_reason,
+        niffyinsure::types::TerminationReason::AdminOverride,
+        "termination_reason must remain AdminOverride"
+    );
+}
+
+/// process_claim returns ClaimNotApproved for a rejected claim — explicit assertion
+/// that the payout guard is structurally enforced.
+#[test]
+fn process_claim_returns_claim_not_approved_for_rejected_claim() {
+    let (env, client, v1, v2, _v3) = three_voter_setup();
+    let cid = file(&client, &v1, 100_000, &env);
+    client.vote_on_claim(&v1, &cid, &VoteOption::Reject);
+    client.vote_on_claim(&v2, &cid, &VoteOption::Reject);
+
+    assert_eq!(client.get_claim(&cid).status, ClaimStatus::Rejected);
+
+    let result = client.try_process_claim(&cid);
+    assert!(result.is_err(), "process_claim must fail for a Rejected claim");
+
+    // Verify the error is specifically ClaimNotApproved (not some other error).
+    let err_debug = soroban_sdk::testutils::arbitrary::std::format!("{:?}", result.unwrap_err());
+    assert!(
+        err_debug.contains("ClaimNotApproved"),
+        "error must be ClaimNotApproved; got: {err_debug}"
+    );
+}
+
+/// Strike count increments correctly even when the policy is already inactive
+/// (e.g., admin-terminated before the rejection fires).
+#[test]
+fn strike_increments_on_already_inactive_policy() {
+    let (env, client, admin, _token) = setup();
+    let holder = Address::generate(&env);
+    let voter_a = Address::generate(&env);
+    let voter_b = Address::generate(&env);
+    seed(&client, &holder, 2_000_000, 5_000_000);
+    seed(&client, &voter_a, 1_000_000, 5_000_000);
+    seed(&client, &voter_b, 1_000_000, 5_000_000);
+
+    // File a claim, then admin-terminate the policy before the vote resolves.
+    let cid = file(&client, &holder, 100_000, &env);
+    client.admin_terminate_policy(
+        &admin,
+        &holder,
+        &1u32,
+        &niffyinsure::types::TerminationReason::AdminOverride,
+        &true,
+    );
+
+    // Policy is inactive; vote still completes.
+    client.vote_on_claim(&voter_a, &cid, &VoteOption::Reject);
+    client.vote_on_claim(&voter_b, &cid, &VoteOption::Reject);
+
+    let policy = client.get_policy(&holder, &1u32).unwrap();
+    assert_eq!(
+        policy.strike_count, 1,
+        "strike_count must be 1 after rejection on an already-inactive policy"
+    );
+    assert!(!policy.is_active, "policy must remain inactive");
 }

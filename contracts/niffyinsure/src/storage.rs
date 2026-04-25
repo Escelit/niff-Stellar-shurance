@@ -9,6 +9,24 @@ pub const PERSISTENT_TTL_THRESHOLD: u32 = 100_000;
 /// Target TTL after extension (in ledgers, ~1 year).
 pub const PERSISTENT_TTL_EXTEND_TO: u32 = 6_000_000;
 
+// ── Claim voter snapshot TTL (persistent `ClaimVoters`) ───────────────────────
+//
+// Soroban persistent entries have a ledger TTL; when they expire the key is
+// removed. These values are sized from [`ledger::MAX_VOTING_DURATION_LEDGERS`]
+// so snapshots stay live through the longest allowed vote plus keeper margin.
+// See Stellar docs on state archival and TTL:
+// <https://developers.stellar.org/docs/learn/smart-contract-internals/state-archival>
+//
+/// When remaining TTL for a `ClaimVoters` entry is below this (in ledgers),
+/// `extend_ttl` may extend it toward [`CLAIM_VOTER_SNAPSHOT_EXTEND_TO`].
+pub const CLAIM_VOTER_SNAPSHOT_TTL_THRESHOLD: u32 =
+    ledger::MAX_VOTING_DURATION_LEDGERS + ledger::LEDGERS_PER_WEEK;
+
+/// Minimum target remaining TTL (ledgers from current sequence) after extension
+/// for `ClaimVoters` keys (max voting window + ~3 weeks for permissionless refresh cadence).
+pub const CLAIM_VOTER_SNAPSHOT_EXTEND_TO: u32 =
+    ledger::MAX_VOTING_DURATION_LEDGERS + 3 * ledger::LEDGERS_PER_WEEK;
+
 // ── DataKey ───────────────────────────────────────────────────────────────────
 
 /// Exhaustive enumeration of every storage key used by the contract.
@@ -27,9 +45,23 @@ pub enum DataKey {
     Voters,
     ClaimCounter,
     Paused,
-    ActivePolicyCount(Address),
+    /// New: pending high-risk admin action
+    PendingAdminAction,
     /// Optional per-transaction cap for emergency sweep operations (i128).
     SweepCap,
+    /// Minimum ledgers that must elapse between sweep proposal and execution (notice period).
+    /// 0 = disabled. Default: 0 (off). Recommended mainnet value: ~2880 (~4 hours @ 5s/ledger).
+    SweepNoticePeriodLedgers,
+    /// Configurable ledger window for pending admin actions (default: 100 ledgers ~30min).
+    AdminActionWindowLedgers,
+    ActivePolicyCount(Address),
+    /// Max total **paid** claim amount per policy per rolling ledger window (gross `claim.amount`).
+    RollingClaimCap,
+    /// Ledger length of each rolling window (bucket alignment uses current ledger sequence).
+    RollingClaimWindowLedgers,
+    /// Admin-configurable max evidence entries per claim (u32).
+    /// Falls back to [`IMAGE_URLS_MAX`] when unset.
+    MaxEvidenceCount,
     // ── Reserved: future governance token (`governance_token` module) ────────
     /// Runtime toggle: only meaningful when crate is built with `governance-token`.
     /// Unset or `false` in MVP; no token logic runs unless feature + flag align.
@@ -54,8 +86,33 @@ pub enum DataKey {
     AppealVote(u64, Address),
     /// Configurable voting window in ledgers (set by admin via set_voting_duration_ledgers).
     VoteDurLedgers,
+    /// Participation quorum in basis points (1–10_000). New claims snapshot this at filing.
+    QuorumBps,
     /// Configurable grace period in ledgers after nominal expiry for late renewals.
     GracePeriodLedgers,
+    /// Per-claim snapshot of `QuorumBps` at `file_claim` time (immutable for that claim).
+    ClaimQuorumBps(u64),
+    /// Value of `LastClaimLedger(claimant)` **before** this claim's filing updated it.
+    /// Removed when the claim leaves `Processing` without withdraw, or consumed by `withdraw_claim`.
+    ClaimRateLimitPrev(u64),
+    /// Per-holder replay-protection nonce. Incremented on each successful mutating call
+    /// when the caller supplies `expected_nonce`. Supplementary to Stellar sequence numbers.
+    HolderNonce(Address),
+    // ── Oracle / parametric trigger (experimental) ────────────────────────
+    /// Monotonically increasing trigger ID counter.
+    TriggerCounter,
+    /// Full trigger record keyed by trigger_id.
+    OracleTrigger(u64),
+    /// Current status of a trigger.
+    TriggerStatus(u64),
+    /// Whether oracle triggers are globally enabled (admin toggle).
+    OracleEnabled,
+    /// Registered Ed25519 public key (32 bytes) for an oracle source address.
+    OraclePubKey(Address),
+    /// Last accepted nonce per oracle source address (replay protection).
+    OracleNonce(Address),
+    /// Required quorum count for a given oracle source (0 = single-sig).
+    OracleQuorum(Address),
 }
 
 // ── Instance bump ─────────────────────────────────────────────────────────────
@@ -108,6 +165,56 @@ pub fn clear_pending_admin(env: &Env) {
     env.storage().instance().remove(&DataKey::PendingAdmin);
 }
 
+// ── New: Pending Admin Action ─────────────────────────────────────────────────
+
+pub fn has_pending_admin_action(env: &Env) -> bool {
+    env.storage().instance().has(&DataKey::PendingAdminAction)
+}
+
+pub fn set_pending_admin_action(env: &Env, pending: &crate::admin::PendingAdminAction) {
+    env.storage().instance().set(&DataKey::PendingAdminAction, pending);
+    env.storage().instance().extend_ttl(PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+}
+
+pub fn get_pending_admin_action(env: &Env) -> Option<crate::admin::PendingAdminAction> {
+    env.storage().instance().get(&DataKey::PendingAdminAction)
+}
+
+pub fn clear_pending_admin_action(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingAdminAction);
+}
+
+/// Check expiry and auto-clear/emit if expired.
+/// Returns Some(pending) if valid, None if expired (caller should panic).
+pub fn check_and_clear_expired_admin_action(env: &Env) -> Option<crate::admin::PendingAdminAction> {
+    let pending_opt = get_pending_admin_action(env);
+    if let Some(pending) = pending_opt {
+        let now = env.ledger().sequence();
+        if now > pending.expiry_ledger {
+            clear_pending_admin_action(env);
+            crate::admin::AdminActionExpired {
+                proposer: pending.proposer.clone(),
+                action_id: now.saturating_sub(get_admin_action_window_ledgers(env)),
+                expiry_ledger: pending.expiry_ledger,
+                action: pending.action.clone(),
+            }
+            .publish(env);
+            None
+        } else {
+            Some(pending)
+        }
+    } else {
+        None
+    }
+}
+
+pub fn get_admin_action_window_ledgers(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::AdminActionWindowLedgers)
+        .unwrap_or(100u32)  // Default ~30min @ 5s/ledger
+}
+
 // ── Token (default asset) ─────────────────────────────────────────────────────
 
 pub fn set_token(env: &Env, token: &Address) {
@@ -149,6 +256,38 @@ pub fn get_voting_duration_ledgers(env: &Env) -> u32 {
         .instance()
         .get(&DataKey::VoteDurLedgers)
         .unwrap_or(ledger::VOTE_WINDOW_LEDGERS)
+}
+
+// ── Claim voting quorum (instance + per-claim snapshot) ───────────────────────
+
+pub fn set_quorum_bps(env: &Env, bps: u32) {
+    env.storage().instance().set(&DataKey::QuorumBps, &bps);
+}
+
+/// Current instance quorum (basis points). Defaults to [`crate::types::DEFAULT_QUORUM_BPS`].
+pub fn get_quorum_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::QuorumBps)
+        .unwrap_or(crate::types::DEFAULT_QUORUM_BPS)
+}
+
+pub fn set_claim_quorum_bps(env: &Env, claim_id: u64, bps: u32) {
+    let key = DataKey::ClaimQuorumBps(claim_id);
+    env.storage().persistent().set(&key, &bps);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+}
+
+/// Quorum basis points frozen for this claim at filing. Missing key ⇒ legacy claim:
+/// use [`crate::types::DEFAULT_QUORUM_BPS`] so admin quorum changes never retroactively
+/// alter `Processing` claims that predate per-claim snapshots.
+pub fn get_claim_quorum_bps(env: &Env, claim_id: u64) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ClaimQuorumBps(claim_id))
+        .unwrap_or(crate::types::DEFAULT_QUORUM_BPS)
 }
 
 // ── Grace period (instance) ───────────────────────────────────────────────────
@@ -471,17 +610,38 @@ pub fn snapshot_claim_voters(env: &Env, claim_id: u64) {
     let voters = get_voters(env);
     let key = DataKey::ClaimVoters(claim_id);
     env.storage().persistent().set(&key, &voters);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    env.storage().persistent().extend_ttl(
+        &key,
+        CLAIM_VOTER_SNAPSHOT_TTL_THRESHOLD,
+        CLAIM_VOTER_SNAPSHOT_EXTEND_TO,
+    );
 }
 
 pub fn set_claim_voters(env: &Env, claim_id: u64, voters: &Vec<Address>) {
     let key = DataKey::ClaimVoters(claim_id);
     env.storage().persistent().set(&key, voters);
+    env.storage().persistent().extend_ttl(
+        &key,
+        CLAIM_VOTER_SNAPSHOT_TTL_THRESHOLD,
+        CLAIM_VOTER_SNAPSHOT_EXTEND_TO,
+    );
+}
+
+/// `true` if the persistent `ClaimVoters` entry exists (not expired / evicted).
+pub fn has_claim_voters(env: &Env, claim_id: u64) -> bool {
     env.storage()
         .persistent()
-        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+        .has(&DataKey::ClaimVoters(claim_id))
+}
+
+/// Extend TTL for the snapshot only; does not read or rewrite the voter list.
+pub fn extend_claim_voters_snapshot_ttl(env: &Env, claim_id: u64) {
+    let key = DataKey::ClaimVoters(claim_id);
+    env.storage().persistent().extend_ttl(
+        &key,
+        CLAIM_VOTER_SNAPSHOT_TTL_THRESHOLD,
+        CLAIM_VOTER_SNAPSHOT_EXTEND_TO,
+    );
 }
 
 pub fn get_claim_voters(env: &Env, claim_id: u64) -> Vec<Address> {
@@ -505,6 +665,41 @@ pub fn get_last_claim_ledger(env: &Env, holder: &Address) -> Option<u32> {
         .get(&DataKey::LastClaimLedger(holder.clone()))
 }
 
+pub fn remove_last_claim_ledger(env: &Env, holder: &Address) {
+    let key = DataKey::LastClaimLedger(holder.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Snapshot `LastClaimLedger` before filing (only written when `prev` is `Some`).
+pub fn set_claim_rate_limit_prev(env: &Env, claim_id: u64, prev: Option<u32>) {
+    if let Some(ledger) = prev {
+        let key = DataKey::ClaimRateLimitPrev(claim_id);
+        env.storage().persistent().set(&key, &ledger);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    }
+}
+
+pub fn remove_claim_rate_limit_prev(env: &Env, claim_id: u64) {
+    let key = DataKey::ClaimRateLimitPrev(claim_id);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Read and remove the rate-limit restore snapshot for `claim_id` (withdraw path).
+pub fn take_claim_rate_limit_prev(env: &Env, claim_id: u64) -> Option<u32> {
+    let key = DataKey::ClaimRateLimitPrev(claim_id);
+    let v: Option<u32> = env.storage().persistent().get(&key);
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+    v
+}
+
 // ── Sweep cap (instance) ──────────────────────────────────────────────────────
 
 /// Set optional per-transaction cap for emergency sweep operations.
@@ -517,9 +712,48 @@ pub fn set_sweep_cap(env: &Env, cap: Option<i128>) {
     }
 }
 
-/// Get configured sweep cap (None if not set).
+/// Get current sweep cap (None if not set).
 pub fn get_sweep_cap(env: &Env) -> Option<i128> {
     env.storage().instance().get(&DataKey::SweepCap)
+}
+
+// ── Sweep notice period (instance) ───────────────────────────────────────────
+
+/// Set the on-chain notice period (ledgers) required between sweep proposal and execution.
+pub fn set_sweep_notice_period_ledgers(env: &Env, ledgers: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SweepNoticePeriodLedgers, &ledgers);
+}
+
+/// Get the current sweep notice period in ledgers (0 = disabled).
+pub fn get_sweep_notice_period_ledgers(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::SweepNoticePeriodLedgers)
+        .unwrap_or(0u32)
+}
+
+// ── Max evidence count (instance) ────────────────────────────────────────────
+
+/// Absolute hard maximum the admin setter will never exceed.
+/// Prevents griefing via unbounded evidence storage.
+pub const MAX_EVIDENCE_COUNT_HARD_MAX: u32 = 20;
+
+/// Set admin-configurable max evidence entries per claim.
+/// Caller must enforce `count <= MAX_EVIDENCE_COUNT_HARD_MAX`.
+pub fn set_max_evidence_count(env: &Env, count: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MaxEvidenceCount, &count);
+}
+
+/// Current max evidence count. Falls back to compile-time [`crate::types::IMAGE_URLS_MAX`].
+pub fn get_max_evidence_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MaxEvidenceCount)
+        .unwrap_or(crate::types::IMAGE_URLS_MAX)
 }
 // ── Appeal vote (persistent) ──────────────────────────────────────────────────
 
@@ -535,4 +769,273 @@ pub fn get_appeal_vote(env: &Env, claim_id: u64, voter: &Address) -> Option<Vote
     env.storage()
         .persistent()
         .get(&DataKey::AppealVote(claim_id, voter.clone()))
+}
+
+// ── Rolling claim cap (instance + persistent) ─────────────────────────────────
+
+pub fn set_rolling_claim_cap(env: &Env, cap: i128) {
+    env.storage().instance().set(&DataKey::RollingClaimCap, &cap);
+}
+
+pub fn get_rolling_claim_cap(env: &Env) -> i128 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RollingClaimCap)
+        .unwrap_or(i128::MAX)
+}
+
+pub fn set_rolling_claim_window_ledgers(env: &Env, w: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RollingClaimWindowLedgers, &w);
+}
+
+pub fn get_rolling_claim_window_ledgers(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RollingClaimWindowLedgers)
+        .unwrap_or(1_000_000)
+}
+
+pub fn get_rolling_claim_state(
+    env: &Env,
+    holder: &Address,
+    policy_id: u32,
+) -> Option<RollingClaimWindowState> {
+    env.storage().persistent().get(&DataKey::RollingClaimState(
+        holder.clone(),
+        policy_id,
+    ))
+}
+
+pub fn set_rolling_claim_state(
+    env: &Env,
+    holder: &Address,
+    policy_id: u32,
+    state: &RollingClaimWindowState,
+) {
+    let key = DataKey::RollingClaimState(holder.clone(), policy_id);
+    env.storage().persistent().set(&key, state);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+}
+
+// ── Policy expiry notification (instance) ─────────────────────────────────────
+
+/// Last `end_ledger` for which `PolicyExpired` was emitted for this policy term.
+pub fn get_policy_expired_event_end_ledger(
+    env: &Env,
+    holder: &Address,
+    policy_id: u32,
+) -> Option<u32> {
+    env.storage().instance().get(&DataKey::PolicyExpiredEventEndLedger(
+        holder.clone(),
+        policy_id,
+    ))
+}
+
+pub fn set_policy_expired_event_end_ledger(
+    env: &Env,
+    holder: &Address,
+    policy_id: u32,
+    end_ledger: u32,
+) {
+    env.storage().instance().set(
+        &DataKey::PolicyExpiredEventEndLedger(holder.clone(), policy_id),
+        &end_ledger,
+    );
+}
+
+// ── Per-holder replay-protection nonce (persistent) ──────────────────────────
+//
+// Supplementary to Stellar's native sequence numbers. Opt-in: callers that
+// don't supply `expected_nonce` skip the check entirely. Storage is per-holder
+// persistent entry — one u64 per unique holder, no unbounded growth beyond the
+// holder set itself (which is already tracked in `Voters`).
+
+pub fn get_holder_nonce(env: &Env, holder: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::HolderNonce(holder.clone()))
+        .unwrap_or(0u64)
+}
+
+/// Increment and persist the nonce, returning the new value.
+pub fn increment_holder_nonce(env: &Env, holder: &Address) -> u64 {
+    let next = get_holder_nonce(env, holder)
+        .checked_add(1)
+        .unwrap_or_else(|| panic!("holder nonce overflow"));
+    let key = DataKey::HolderNonce(holder.clone());
+    env.storage().persistent().set(&key, &next);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    next
+}
+
+/// Check `expected` against the current nonce; return `Err` on mismatch.
+/// No-op (returns `Ok`) when `expected` is `None`.
+pub fn check_and_bump_nonce(
+    env: &Env,
+    holder: &Address,
+    expected: Option<u64>,
+) -> Result<(), crate::validate::Error> {
+    if let Some(exp) = expected {
+        let current = get_holder_nonce(env, holder);
+        if exp != current {
+            return Err(crate::validate::Error::NonceMismatch);
+        }
+    }
+    increment_holder_nonce(env, holder);
+    Ok(())
+}
+
+// ── Oracle / parametric trigger storage (experimental) ───────────────────────
+
+#[cfg(feature = "experimental")]
+pub fn next_trigger_id(env: &Env) -> u64 {
+    let key = DataKey::TriggerCounter;
+    let next: u64 = env.storage().instance().get(&key).unwrap_or(0u64) + 1;
+    env.storage().instance().set(&key, &next);
+    next
+}
+
+#[cfg(feature = "experimental")]
+pub fn set_oracle_trigger(env: &Env, trigger_id: u64, trigger: &crate::types::OracleTrigger) {
+    let key = DataKey::OracleTrigger(trigger_id);
+    env.storage().persistent().set(&key, trigger);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+}
+
+#[cfg(feature = "experimental")]
+pub fn get_oracle_trigger(env: &Env, trigger_id: u64) -> Option<crate::types::OracleTrigger> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::OracleTrigger(trigger_id))
+}
+
+#[cfg(feature = "experimental")]
+pub fn set_trigger_status(env: &Env, trigger_id: u64, status: crate::types::TriggerStatus) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TriggerStatus(trigger_id), &status);
+}
+
+#[cfg(feature = "experimental")]
+pub fn get_trigger_status(env: &Env, trigger_id: u64) -> Option<crate::types::TriggerStatus> {
+    env.storage()
+        .instance()
+        .get(&DataKey::TriggerStatus(trigger_id))
+}
+
+#[cfg(feature = "experimental")]
+pub fn set_oracle_enabled(env: &Env, enabled: bool) {
+    env.storage().instance().set(&DataKey::OracleEnabled, &enabled);
+}
+
+#[cfg(feature = "experimental")]
+pub fn is_oracle_enabled(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::OracleEnabled)
+        .unwrap_or(false)
+}
+
+/// Register an Ed25519 public key for an oracle source address.
+#[cfg(feature = "experimental")]
+pub fn set_oracle_pub_key(env: &Env, source: &Address, pub_key: &soroban_sdk::BytesN<32>) {
+    env.storage()
+        .instance()
+        .set(&DataKey::OraclePubKey(source.clone()), pub_key);
+}
+
+#[cfg(feature = "experimental")]
+pub fn get_oracle_pub_key(env: &Env, source: &Address) -> Option<soroban_sdk::BytesN<32>> {
+    env.storage()
+        .instance()
+        .get(&DataKey::OraclePubKey(source.clone()))
+}
+
+/// Get the last accepted nonce for an oracle source (0 if never used).
+#[cfg(feature = "experimental")]
+pub fn get_oracle_nonce(env: &Env, source: &Address) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::OracleNonce(source.clone()))
+        .unwrap_or(0u64)
+}
+
+/// Advance the oracle nonce. Returns Err if `nonce` is not strictly greater than current.
+#[cfg(feature = "experimental")]
+pub fn advance_oracle_nonce(
+    env: &Env,
+    source: &Address,
+    nonce: u64,
+) -> Result<(), crate::validate::OracleError> {
+    let current = get_oracle_nonce(env, source);
+    if nonce <= current {
+        return Err(crate::validate::OracleError::ReplayedNonce);
+    }
+    let key = DataKey::OracleNonce(source.clone());
+    env.storage().persistent().set(&key, &nonce);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_EXTEND_TO);
+    Ok(())
+}
+
+/// Required number of oracle signatures for a source (0 or 1 = single-sig).
+#[cfg(feature = "experimental")]
+pub fn get_oracle_quorum(env: &Env, source: &Address) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::OracleQuorum(source.clone()))
+        .unwrap_or(1u32)
+}
+
+#[cfg(feature = "experimental")]
+pub fn set_oracle_quorum(env: &Env, source: &Address, quorum: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::OracleQuorum(source.clone()), &quorum);
+}
+
+// ── Non-experimental stubs (panic guards) ────────────────────────────────────
+
+#[cfg(not(feature = "experimental"))]
+pub fn next_trigger_id(_env: &Env) -> u64 {
+    panic!("ORACLE_TRIGGERS_DISABLED")
+}
+
+#[cfg(not(feature = "experimental"))]
+pub fn set_oracle_trigger(_env: &Env, _id: u64, _trigger: &crate::types::OracleTrigger) {
+    panic!("ORACLE_TRIGGERS_DISABLED")
+}
+
+#[cfg(not(feature = "experimental"))]
+pub fn get_oracle_trigger(_env: &Env, _id: u64) -> Option<crate::types::OracleTrigger> {
+    panic!("ORACLE_TRIGGERS_DISABLED")
+}
+
+#[cfg(not(feature = "experimental"))]
+pub fn set_trigger_status(_env: &Env, _id: u64, _status: crate::types::TriggerStatus) {
+    panic!("ORACLE_TRIGGERS_DISABLED")
+}
+
+#[cfg(not(feature = "experimental"))]
+pub fn get_trigger_status(_env: &Env, _id: u64) -> Option<crate::types::TriggerStatus> {
+    panic!("ORACLE_TRIGGERS_DISABLED")
+}
+
+#[cfg(not(feature = "experimental"))]
+pub fn is_oracle_enabled(_env: &Env) -> bool {
+    panic!("ORACLE_TRIGGERS_DISABLED")
+}
+
+#[cfg(not(feature = "experimental"))]
+pub fn set_oracle_enabled(_env: &Env, _enabled: bool) {
+    panic!("ORACLE_TRIGGERS_DISABLED")
 }

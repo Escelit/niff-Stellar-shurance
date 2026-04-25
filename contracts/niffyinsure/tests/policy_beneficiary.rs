@@ -2,13 +2,15 @@
 
 #![cfg(test)]
 
+mod common;
+
 use niffyinsure::{
     types::{AgeBand, Claim, ClaimStatus, CoverageTier, PolicyType, RegionTier},
     NiffyInsureClient,
 };
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, vec, Address, Env, String,
+    token, Address, Env, String,
 };
 
 fn setup() -> (
@@ -62,7 +64,7 @@ fn initiate(
         &10u32,
         &1_000_000_000i128,
         token_addr,
-        &beneficiary,
+        &niffyinsure::types::InitiatePolicyOptions { beneficiary: beneficiary, deductible: None, expected_nonce: None },
     )
 }
 
@@ -80,9 +82,10 @@ fn inject_approved_claim(
         policy_id: policy.policy_id,
         claimant: holder.clone(),
         amount,
+        deductible: 0,
         asset: token_addr.clone(),
         details: String::from_str(env, "test"),
-        image_urls: vec![env],
+        evidence: common::empty_evidence(env),
         status: ClaimStatus::Approved,
         voting_deadline_ledger: 1_000,
         approve_votes: 3,
@@ -197,4 +200,57 @@ fn set_beneficiary_requires_holder_authorization() {
     assert!(client
         .try_set_beneficiary(&holder, &policy.policy_id, &None)
         .is_err());
+}
+
+#[test]
+fn set_beneficiary_no_op_when_value_unchanged() {
+    // Setting the same beneficiary twice must not revert and must leave the
+    // stored value identical (idempotent).
+    let (env, client, _contract_id, token_addr, token_admin) = setup();
+    let holder = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    fund_and_approve(&env, &client, &token_addr, &token_admin, &holder);
+
+    let policy = initiate(&client, &holder, &token_addr, Some(beneficiary.clone()));
+    // Call set_beneficiary with the same address — must succeed silently.
+    client.set_beneficiary(&holder, &policy.policy_id, &Some(beneficiary.clone()));
+
+    let updated = client.get_policy(&holder, &policy.policy_id).unwrap();
+    assert_eq!(updated.beneficiary, Some(beneficiary));
+}
+
+#[test]
+fn set_beneficiary_can_clear_back_to_none() {
+    // After setting a beneficiary, clearing it (None) must route payouts back
+    // to the holder.
+    let (env, client, contract_id, token_addr, token_admin) = setup();
+    let holder = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    fund_and_approve(&env, &client, &token_addr, &token_admin, &holder);
+    token_admin.mint(&contract_id, &10_000_000i128);
+
+    let policy = initiate(&client, &holder, &token_addr, Some(beneficiary.clone()));
+    // Clear the beneficiary.
+    client.set_beneficiary(&holder, &policy.policy_id, &None);
+
+    let updated = client.get_policy(&holder, &policy.policy_id).unwrap();
+    assert!(updated.beneficiary.is_none());
+
+    // Payout must now go to holder, not the former beneficiary.
+    inject_approved_claim(
+        &env,
+        &contract_id,
+        1,
+        &updated,
+        &holder,
+        &token_addr,
+        4_000_000,
+    );
+
+    let tok = token::Client::new(&env, &token_addr);
+    let before_holder = tok.balance(&holder);
+    let before_ben = tok.balance(&beneficiary);
+    client.process_claim(&1u64);
+    assert_eq!(tok.balance(&holder), before_holder + 4_000_000i128);
+    assert_eq!(tok.balance(&beneficiary), before_ben, "former beneficiary must not receive payout after clear");
 }

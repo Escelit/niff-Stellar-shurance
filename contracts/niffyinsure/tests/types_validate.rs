@@ -2,12 +2,39 @@
 
 use niffyinsure::{
     types::{
-        Claim, ClaimStatus, Policy, PolicyType, RegionTier, TerminationReason, VoteOption,
-        DETAILS_MAX_LEN, IMAGE_URLS_MAX, IMAGE_URL_MAX_LEN,
+        AgeBand, Claim, ClaimEvidenceEntry, ClaimStatus, CoverageTier, Policy, PolicyType,
+        RegionTier, RiskInput, TerminationReason, VoteOption, DETAILS_MAX_LEN, IMAGE_URLS_MAX,
+        IMAGE_URL_MAX_LEN, REASON_MAX_LEN, SAFETY_SCORE_MAX,
     },
-    validate::{check_claim_fields, check_claim_open, check_policy, check_policy_active, Error},
+    validate::{
+        check_claim_fields, check_claim_open, check_policy, check_policy_active, check_reason,
+        check_risk_input, Error,
+    },
 };
-use soroban_sdk::{testutils::Address as _, vec, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, BytesN, Address, Env, String, Vec};
+
+fn non_zero_hash(env: &Env) -> BytesN<32> {
+    let mut a = [0u8; 32];
+    a[0] = 1;
+    BytesN::from_array(env, &a)
+}
+
+fn zero_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[0u8; 32])
+}
+
+fn empty_evidence(env: &Env) -> Vec<ClaimEvidenceEntry> {
+    Vec::new(env)
+}
+
+fn one_url_evidence(env: &Env, url: &str) -> Vec<ClaimEvidenceEntry> {
+    let mut v = Vec::new(env);
+    v.push_back(ClaimEvidenceEntry {
+        url: String::from_str(env, url),
+        hash: non_zero_hash(env),
+    });
+    v
+}
 
 fn dummy_policy(env: &Env, start: u32, end: u32, coverage: i128, active: bool) -> Policy {
     Policy {
@@ -21,6 +48,7 @@ fn dummy_policy(env: &Env, start: u32, end: u32, coverage: i128, active: bool) -
         start_ledger: start,
         end_ledger: end,
         asset: Address::generate(env),
+        deductible: None,
         beneficiary: None,
         terminated_at_ledger: 0,
         termination_reason: TerminationReason::None,
@@ -35,9 +63,10 @@ fn dummy_claim(env: &Env, amount: i128, status: ClaimStatus) -> Claim {
         policy_id: 1,
         claimant: Address::generate(env),
         amount,
+        deductible: 0,
         asset: Address::generate(env),
         details: String::from_str(env, "fire damage"),
-        image_urls: vec![env],
+        evidence: empty_evidence(env),
         status,
         voting_deadline_ledger: 1_000,
         approve_votes: 0,
@@ -89,6 +118,30 @@ fn equal_ledger_window_rejected() {
     assert_eq!(check_policy(&p), Err(Error::InvalidLedgerWindow));
 }
 
+#[test]
+fn deductible_within_coverage_passes() {
+    let env = Env::default();
+    let mut p = dummy_policy(&env, 100, 200, 50_000_000, true);
+    p.deductible = Some(10_000_000);
+    assert_eq!(check_policy(&p), Ok(()));
+}
+
+#[test]
+fn deductible_exceeding_coverage_rejected() {
+    let env = Env::default();
+    let mut p = dummy_policy(&env, 100, 200, 50_000_000, true);
+    p.deductible = Some(50_000_001);
+    assert_eq!(check_policy(&p), Err(Error::Overflow));
+}
+
+#[test]
+fn negative_deductible_rejected() {
+    let env = Env::default();
+    let mut p = dummy_policy(&env, 100, 200, 50_000_000, true);
+    p.deductible = Some(-1);
+    assert_eq!(check_policy(&p), Err(Error::Overflow));
+}
+
 // ── Policy active check ───────────────────────────────────────────────────────
 
 #[test]
@@ -119,9 +172,9 @@ fn inactive_policy_rejected() {
 fn valid_claim_passes() {
     let env = Env::default();
     let details = String::from_str(&env, "roof collapsed");
-    let urls = vec![&env, String::from_str(&env, "ipfs://Qm123")];
+    let ev = one_url_evidence(&env, "ipfs://Qm123");
     assert_eq!(
-        check_claim_fields(&env, 1_000_000, 50_000_000, &details, &urls),
+        check_claim_fields(&env, 1_000_000, 50_000_000, &details, &ev),
         Ok(())
     );
 }
@@ -130,9 +183,9 @@ fn valid_claim_passes() {
 fn zero_claim_amount_rejected() {
     let env = Env::default();
     let details = String::from_str(&env, "x");
-    let urls = vec![&env];
+    let ev = empty_evidence(&env);
     assert_eq!(
-        check_claim_fields(&env, 0, 50_000_000, &details, &urls),
+        check_claim_fields(&env, 0, 50_000_000, &details, &ev),
         Err(Error::ClaimAmountZero)
     );
 }
@@ -141,9 +194,9 @@ fn zero_claim_amount_rejected() {
 fn claim_exceeds_coverage_rejected() {
     let env = Env::default();
     let details = String::from_str(&env, "x");
-    let urls = vec![&env];
+    let ev = empty_evidence(&env);
     assert_eq!(
-        check_claim_fields(&env, 60_000_000, 50_000_000, &details, &urls),
+        check_claim_fields(&env, 60_000_000, 50_000_000, &details, &ev),
         Err(Error::ClaimExceedsCoverage)
     );
 }
@@ -152,9 +205,9 @@ fn claim_exceeds_coverage_rejected() {
 fn claim_amount_equal_to_coverage_passes() {
     let env = Env::default();
     let details = String::from_str(&env, "x");
-    let urls = vec![&env];
+    let ev = empty_evidence(&env);
     assert_eq!(
-        check_claim_fields(&env, 50_000_000, 50_000_000, &details, &urls),
+        check_claim_fields(&env, 50_000_000, 50_000_000, &details, &ev),
         Ok(())
     );
 }
@@ -163,17 +216,17 @@ fn claim_amount_equal_to_coverage_passes() {
 fn details_at_max_len_passes() {
     let env = Env::default();
     let s: soroban_sdk::String = String::from_str(&env, &"a".repeat(DETAILS_MAX_LEN as usize));
-    let urls = vec![&env];
-    assert_eq!(check_claim_fields(&env, 1, 100, &s, &urls), Ok(()));
+    let ev = empty_evidence(&env);
+    assert_eq!(check_claim_fields(&env, 1, 100, &s, &ev), Ok(()));
 }
 
 #[test]
 fn details_over_max_len_rejected() {
     let env = Env::default();
     let s = String::from_str(&env, &"a".repeat(DETAILS_MAX_LEN as usize + 1));
-    let urls = vec![&env];
+    let ev = empty_evidence(&env);
     assert_eq!(
-        check_claim_fields(&env, 1, 100, &s, &urls),
+        check_claim_fields(&env, 1, 100, &s, &ev),
         Err(Error::DetailsTooLong)
     );
 }
@@ -183,12 +236,15 @@ fn too_many_image_urls_rejected() {
     let env = Env::default();
     let details = String::from_str(&env, "x");
     let url = String::from_str(&env, "ipfs://Qm1");
-    let mut urls = vec![&env];
+    let mut ev = Vec::new(&env);
     for _ in 0..=IMAGE_URLS_MAX {
-        urls.push_back(url.clone());
+        ev.push_back(ClaimEvidenceEntry {
+            url: url.clone(),
+            hash: non_zero_hash(&env),
+        });
     }
     assert_eq!(
-        check_claim_fields(&env, 1, 100, &details, &urls),
+        check_claim_fields(&env, 1, 100, &details, &ev),
         Err(Error::TooManyImageUrls)
     );
 }
@@ -198,10 +254,29 @@ fn image_url_over_max_len_rejected() {
     let env = Env::default();
     let details = String::from_str(&env, "x");
     let long_url = String::from_str(&env, &"u".repeat(IMAGE_URL_MAX_LEN as usize + 1));
-    let urls = vec![&env, long_url];
+    let mut ev = Vec::new(&env);
+    ev.push_back(ClaimEvidenceEntry {
+        url: long_url,
+        hash: non_zero_hash(&env),
+    });
     assert_eq!(
-        check_claim_fields(&env, 1, 100, &details, &urls),
+        check_claim_fields(&env, 1, 100, &details, &ev),
         Err(Error::ImageUrlTooLong)
+    );
+}
+
+#[test]
+fn evidence_sha256_all_zero_rejected() {
+    let env = Env::default();
+    let details = String::from_str(&env, "x");
+    let mut ev = Vec::new(&env);
+    ev.push_back(ClaimEvidenceEntry {
+        url: String::from_str(&env, "ipfs://a"),
+        hash: zero_hash(&env),
+    });
+    assert_eq!(
+        check_claim_fields(&env, 1, 100, &details, &ev),
+        Err(Error::ExcessiveEvidenceBytes)
     );
 }
 
@@ -235,6 +310,13 @@ fn rejected_claim_is_terminal() {
     assert_eq!(check_claim_open(&c), Err(Error::ClaimAlreadyTerminal));
 }
 
+#[test]
+fn withdrawn_claim_is_terminal() {
+    let env = Env::default();
+    let c = dummy_claim(&env, 1_000_000, ClaimStatus::Withdrawn);
+    assert_eq!(check_claim_open(&c), Err(Error::ClaimAlreadyTerminal));
+}
+
 // ── Enum coherence ────────────────────────────────────────────────────────────
 
 #[test]
@@ -249,4 +331,99 @@ fn claim_status_terminal_flags() {
     assert!(ClaimStatus::Approved.is_terminal());
     assert!(ClaimStatus::Paid.is_terminal());
     assert!(ClaimStatus::Rejected.is_terminal());
+    assert!(ClaimStatus::Withdrawn.is_terminal());
+}
+
+// ── image_url boundary (at max len passes) ────────────────────────────────────
+
+#[test]
+fn image_url_at_max_len_passes() {
+    let env = Env::default();
+    let details = String::from_str(&env, "x");
+    let url_at_max = String::from_str(&env, &"u".repeat(IMAGE_URL_MAX_LEN as usize));
+    let mut ev = Vec::new(&env);
+    ev.push_back(ClaimEvidenceEntry {
+        url: url_at_max,
+        hash: non_zero_hash(&env),
+    });
+    assert_eq!(check_claim_fields(&env, 1, 100, &details, &ev), Ok(()));
+}
+
+// ── safety_score boundary tests ───────────────────────────────────────────────
+
+fn dummy_risk_input(safety_score: u32) -> RiskInput {
+    RiskInput {
+        region: RegionTier::Medium,
+        age_band: AgeBand::Adult,
+        coverage: CoverageTier::Standard,
+        safety_score,
+    }
+}
+
+#[test]
+fn safety_score_zero_passes() {
+    assert_eq!(check_risk_input(&dummy_risk_input(0)), Ok(()));
+}
+
+#[test]
+fn safety_score_at_max_passes() {
+    assert_eq!(check_risk_input(&dummy_risk_input(SAFETY_SCORE_MAX)), Ok(()));
+}
+
+#[test]
+fn safety_score_over_max_rejected() {
+    assert_eq!(
+        check_risk_input(&dummy_risk_input(SAFETY_SCORE_MAX + 1)),
+        Err(Error::SafetyScoreOutOfRange)
+    );
+}
+
+// ── reason length boundary tests ──────────────────────────────────────────────
+
+#[test]
+fn reason_at_max_len_passes() {
+    let env = Env::default();
+    let r = String::from_str(&env, &"r".repeat(REASON_MAX_LEN as usize));
+    assert_eq!(check_reason(&r), Ok(()));
+}
+
+#[test]
+fn reason_over_max_len_rejected() {
+    let env = Env::default();
+    let r = String::from_str(&env, &"r".repeat(REASON_MAX_LEN as usize + 1));
+    assert_eq!(check_reason(&r), Err(Error::ReasonTooLong));
+}
+
+#[test]
+fn reason_empty_passes() {
+    let env = Env::default();
+    let r = String::from_str(&env, "");
+    assert_eq!(check_reason(&r), Ok(()));
+}
+
+// ── details boundary (empty passes) ──────────────────────────────────────────
+
+#[test]
+fn details_empty_passes() {
+    let env = Env::default();
+    let s = String::from_str(&env, "");
+    let ev = empty_evidence(&env);
+    assert_eq!(check_claim_fields(&env, 1, 100, &s, &ev), Ok(()));
+}
+
+// ── evidence count at max passes ──────────────────────────────────────────────
+
+#[test]
+fn evidence_at_max_count_passes() {
+    let env = Env::default();
+    let details = String::from_str(&env, "x");
+    let url = String::from_str(&env, "ipfs://Qm1");
+    let mut ev = Vec::new(&env);
+    for _ in 0..IMAGE_URLS_MAX {
+        ev.push_back(ClaimEvidenceEntry {
+            url: url.clone(),
+            hash: non_zero_hash(&env),
+        });
+    }
+    assert_eq!(check_claim_fields(&env, 1, 100, &details, &ev), Ok(()));
 }

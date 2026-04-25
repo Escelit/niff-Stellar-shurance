@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MetricsService } from '../metrics/metrics.service';
+import { getNetworkConfig } from '../config/network.config';
 import { POLICY_BATCH_GET_MAX } from '../chain/chain.constants';
 import {
   Account,
@@ -26,6 +27,10 @@ import {
   Address,
 } from '@stellar/stellar-sdk';
 import { rpc as SorobanRpc } from '@stellar/stellar-sdk';
+import {
+  claimEvidenceVecToScVal,
+  type ClaimEvidenceInput,
+} from '../soroban/file-claim-evidence';
 
 const { Api, assembleTransaction } = SorobanRpc;
 
@@ -110,21 +115,15 @@ export class SorobanService {
   }
 
   private get rpcUrl(): string {
-    return this.configService.get<string>(
-      'SOROBAN_RPC_URL',
-      'https://soroban-testnet.stellar.org',
-    );
+    return getNetworkConfig().rpcUrl;
   }
 
   private get networkPassphrase(): string {
-    return this.configService.get<string>(
-      'STELLAR_NETWORK_PASSPHRASE',
-      'Test SDF Network ; September 2015',
-    );
+    return getNetworkConfig().networkPassphrase;
   }
 
   private get contractId(): string {
-    return this.configService.get<string>('CONTRACT_ID', '');
+    return getNetworkConfig().contractIds.niffyinsure;
   }
 
   private makeServer(): SorobanRpc.Server {
@@ -201,8 +200,8 @@ export class SorobanService {
     return (
       e.includes('policybatch') ||
       e.includes('policy_batch') ||
-      // ContractError tag 49 = PolicyBatchTooLarge (niffyinsure validate::Error)
-      /\b49\b/.test(error)
+      // ContractError tag 50 = PolicyBatchTooLarge
+      /\b50\b/.test(error)
     );
   }
 
@@ -302,7 +301,7 @@ export class SorobanService {
    * Build unsigned initiate_policy transaction with simulation-derived footprints.
    * Argument ordering matches `contracts/niffyinsure/src/lib.rs` initiate_policy:
    * holder, policy_type, region, age_band, coverage_tier, safety_score,
-   * base_amount, asset, beneficiary (optional payout address).
+   * base_amount, asset, beneficiary (optional payout address), deductible (optional i128).
    */
   async buildInitiatePolicyTransaction(args: {
     holder: string;
@@ -314,6 +313,7 @@ export class SorobanService {
     baseAmount: bigint;
     asset?: string;
     beneficiary?: string;
+    deductible?: bigint | null;
   }): Promise<BuildTransactionResult> {
     return this.trackRpc('build_initiate_policy', () =>
       this._buildInitiatePolicyTransaction(args),
@@ -330,13 +330,14 @@ export class SorobanService {
     baseAmount: bigint;
     asset?: string;
     beneficiary?: string;
+    deductible?: bigint | null;
   }): Promise<BuildTransactionResult> {
     const server = this.makeServer();
     const account = await this.loadAccount(server, args.holder);
     const ledgerInfo = await server.getLatestLedger();
 
     // Resolve asset: use caller-supplied address or fall back to the configured default token.
-    const assetAddress = args.asset ?? this.configService.get<string>('DEFAULT_TOKEN_CONTRACT_ID', '');
+    const assetAddress = args.asset ?? getNetworkConfig().contractIds.defaultToken;
 
     const beneficiaryScv =
       args.beneficiary == null || args.beneficiary === ''
@@ -344,6 +345,14 @@ export class SorobanService {
         : nativeToScVal(new Address(args.beneficiary), {
             type: 'option',
             innerType: 'address',
+          } as { type: string; innerType: string });
+
+    const deductibleScv =
+      args.deductible == null || args.deductible === undefined
+        ? nativeToScVal(null)
+        : nativeToScVal(args.deductible, {
+            type: 'option',
+            innerType: 'i128',
           } as { type: string; innerType: string });
 
     const scArgs = [
@@ -356,6 +365,7 @@ export class SorobanService {
       nativeToScVal(args.baseAmount, { type: 'i128' }),
       new Address(assetAddress).toScVal(),
       beneficiaryScv,
+      deductibleScv,
     ];
 
     const contract = new Contract(this.contractId);
@@ -420,14 +430,15 @@ export class SorobanService {
 
   /**
    * Build unsigned file_claim transaction.
-   * Signature: file_claim(holder, policy_id, amount, details, image_urls)
+   * Signature: file_claim(holder, policy_id, amount, details, evidence)
+   * Each evidence item: URL + 32-byte SHA-256 hex (from IPFS proxy / client).
    */
   async buildFileClaimTransaction(args: {
     holder: string;
     policyId: number;
     amount: bigint;
     details: string;
-    imageUrls: string[];
+    evidence: ClaimEvidenceInput[];
   }): Promise<BuildTransactionResult> {
     return this.trackRpc('build_file_claim', () =>
       this._buildFileClaimTransaction(args),
@@ -439,7 +450,7 @@ export class SorobanService {
     policyId: number;
     amount: bigint;
     details: string;
-    imageUrls: string[];
+    evidence: ClaimEvidenceInput[];
   }): Promise<BuildTransactionResult> {
     const server = this.makeServer();
     const account = await this.loadAccount(server, args.holder);
@@ -450,9 +461,7 @@ export class SorobanService {
       nativeToScVal(args.policyId, { type: 'u32' }),
       nativeToScVal(args.amount, { type: 'i128' }),
       nativeToScVal(args.details, { type: 'string' }),
-      xdr.ScVal.scvVec(
-        args.imageUrls.map((url) => nativeToScVal(url, { type: 'string' })),
-      ),
+      claimEvidenceVecToScVal(args.evidence),
     ];
 
     const contract = new Contract(this.contractId);
@@ -699,7 +708,7 @@ export class SorobanService {
     const ledgerInfo = await server.getLatestLedger();
 
     const assetAddress =
-      args.asset ?? this.configService.get<string>('DEFAULT_TOKEN_CONTRACT_ID', '');
+      args.asset ?? getNetworkConfig().contractIds.defaultToken;
 
     // Simulate premium first to include it in the response for UI display.
     const premiumResult = await this.simulateGeneratePremium({
@@ -781,6 +790,64 @@ export class SorobanService {
       premiumStroops: premiumResult.premiumStroops,
       premiumXlm: premiumResult.premiumXlm,
       premiumSource: premiumResult.source,
+    };
+  }
+
+  /**
+   * Simulate `get_treasury_balance()` → i128 (contract-held default token balance).
+   * Used by scheduled solvency checks; throws on simulation/RPC failure (no silent fallback).
+   */
+  async simulateGetTreasuryBalance(args: {
+    sourceAccount: string;
+  }): Promise<{ balanceStroops: string; minResourceFee: string }> {
+    return this.trackRpc('simulate_get_treasury_balance', () =>
+      this._simulateGetTreasuryBalance(args),
+    );
+  }
+
+  private async _simulateGetTreasuryBalance(args: {
+    sourceAccount: string;
+  }): Promise<{ balanceStroops: string; minResourceFee: string }> {
+    const cid = this.contractId;
+    if (!cid) {
+      throw new BadRequestException({
+        code: 'CONTRACT_NOT_CONFIGURED',
+        message: 'CONTRACT_ID is not set.',
+      });
+    }
+
+    const server = this.makeServer();
+    const account = await this.loadAccount(server, args.sourceAccount);
+    const contract = new Contract(cid);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(contract.call('get_treasury_balance'))
+      .setTimeout(30)
+      .build();
+
+    const simulation = await server.simulateTransaction(tx);
+    if (Api.isSimulationError(simulation)) {
+      const errMsg =
+        typeof simulation.error === 'string'
+          ? simulation.error
+          : JSON.stringify(simulation.error ?? {});
+      this.mapSimulationError(errMsg);
+    }
+
+    const success = simulation as SorobanRpc.Api.SimulateTransactionSuccessResponse;
+    const retval = success.result?.retval;
+    let balance = BigInt(0);
+    if (retval) {
+      const native = scValToNative(retval);
+      balance =
+        typeof native === 'bigint' ? native : BigInt(String(native));
+    }
+
+    return {
+      balanceStroops: balance.toString(),
+      minResourceFee: success.minResourceFee ?? '0',
     };
   }
 

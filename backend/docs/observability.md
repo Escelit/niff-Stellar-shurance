@@ -26,6 +26,14 @@ Restrict it at the ingress/firewall level — it must not be publicly reachable.
 
 `error_type` values: `client_error`, `unavailable`, `unknown`.
 
+### Quote simulation cache
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `quote_simulation_cache_requests_total` | Counter | `result` | `hit` = Redis served; `miss` = computed via RPC; `bypass` = `Cache-Control: no-cache` |
+
+See [quote-simulation-cache.md](./quote-simulation-cache.md) for TTL and invalidation.
+
 ### Cardinality notes
 
 - `route` is normalised: numeric path segments → `:id`, UUIDs → `:uuid`,
@@ -105,10 +113,21 @@ Load `docs/prometheus-alerts.yml` into your Prometheus `rule_files`.
 
 | Alert | Threshold | Severity |
 |---|---|---|
-| `High5xxRate` | > 0.5 errors/s for 2 min | critical |
-| `HighRpcErrorRate` | > 0.2 errors/s for 2 min | warning |
-| `HighP99Latency` | p99 > 3 s for 5 min | warning |
-| `HighRpcP95Latency` | p95 > 10 s for 5 min | warning |
+| `High5xxRate` | > 1 errors/s for 10 min | critical |
+| `HighRpcErrorRate` | > 0.5 errors/s for 10 min | warning |
+| `HighP99Latency` | p99 > 3 s for 10 min | warning |
+| `HighRpcP95Latency` | p95 > 8 s for 10 min | warning |
+| `IndexerLagHigh` | > 30 ledger lag for 10 min | warning |
+| `SolvencyBufferLow` | buffer below configured threshold | critical |
+| `DlqDepthHigh` | dead-letter queue depth > 10 for 5 min | critical |
+
+#### Operator Runbook
+
+- `High5xxRate` / `HighRpcErrorRate`: first check for recent deploys, service restarts, and API gateway errors. If the issue is transient, acknowledge and continue monitoring; if not, escalate to backend engineering and rollback the most recent deployment if required.
+- `HighP99Latency` / `HighRpcP95Latency`: review traces and Prometheus panels for the affected route / RPC method. Look for slow Soroban RPC calls, database contention, or request storms before expanding the incident.
+- `IndexerLagHigh`: inspect the indexer queue and database cursor. Confirm whether the indexer is stalled, retrying with repeated failures, or simply catching up after a backlog. Use `/admin/queues` and query `ledger_cursors` to diagnose.
+- `SolvencyBufferLow`: verify the latest solvency snapshot in the admin dashboard and check approved claims versus contract balance. If the buffer is below the configured safety threshold, open an on-call incident and notify finance/compliance.
+- `DlqDepthHigh`: use Bull Board or `/admin/queues/:queue/jobs/:jobId/retry` to replay failed jobs. Investigate the failure reason from `bullmq_dlq_jobs_total` labels and address the root cause before mass retries.
 
 ---
 
@@ -129,3 +148,48 @@ this.winston.log(level, message, { ...fields, traceId, spanId });
 Similarly, `MetricsService.recordHttpRequest` / `recordRpcCall` map directly
 to OTel `Meter` histogram/counter calls — swap the prom-client calls for OTel
 Meter API calls when you're ready to migrate.
+
+## Queue Dashboard — `/admin/queues`
+
+Bull Board is mounted at `/admin/queues`. It requires a valid admin JWT in the
+`Authorization: Bearer <token>` header. No token or a non-admin token returns 401/403.
+
+## Dead-Letter Queue (DLQ)
+
+Jobs that fail `DLQ_MAX_ATTEMPTS` (5) times are moved to BullMQ's **failed** set.
+Two metrics track this:
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `bullmq_dlq_depth` | Gauge | `queue` | Current failed-job count per queue |
+| `bullmq_dlq_jobs_total` | Counter | `queue`, `job_name`, `failure_reason` | Cumulative jobs exhausted |
+
+Alert `DlqDepthHigh` fires when `bullmq_dlq_depth > 10` for 5 minutes.
+The alert annotation includes the queue name and links to the replay endpoint.
+
+### Manual Job Replay
+
+1. Open Bull Board at `https://<host>/admin/queues` (admin JWT required) and
+   identify the failed job id from the UI.
+2. Or query the API:
+   ```
+   GET /api/admin/queues   # via Bull Board UI
+   ```
+3. Replay a single job:
+   ```
+   POST /api/admin/queues/:queue/jobs/:jobId/retry
+   Authorization: Bearer <admin-jwt>
+   ```
+   The job is moved back to `waiting` and retried from scratch.
+   An audit row is written with actor, queue, and jobId.
+4. To bulk-replay all failed jobs on a queue, use the Bull Board UI
+   "Retry all" button — it is equivalent to calling retry on each job.
+
+### Queues monitored
+
+| Queue | Max attempts | Purpose |
+|---|---|---|
+| `indexer` | 5 | Soroban ledger event indexing |
+| `notifications` | 5 | Claim-finalized email/Discord/Telegram |
+| `claim-events` | 5 | Raw claim event DB writes |
+| `reindex` | 5 | Admin-triggered ledger reindex |

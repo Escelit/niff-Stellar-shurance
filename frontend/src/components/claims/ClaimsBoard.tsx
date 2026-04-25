@@ -15,6 +15,8 @@ import type { ClaimBoard } from "@/lib/schemas/claims-board";
 import { ClaimList } from "./ClaimList";
 import { FilterBar } from "./FilterBar";
 import { PaginationControls } from "./PaginationControls";
+import { SkeletonRow } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
 import type { ClaimFilters, TallyUpdate } from "./types";
 
 
@@ -175,16 +177,11 @@ export function ClaimsBoard() {
       {/* Main content area */}
       <section aria-label="Claims list" aria-live="polite" aria-atomic="false">
         {loading && (
-          <div
-            role="status"
-            aria-label="Loading claims"
-            className="flex justify-center py-12"
-          >
-            <span
-              aria-hidden="true"
-              className="h-8 w-8 animate-spin rounded-full border-4 border-blue-500 border-t-transparent"
-            />
+          <div role="status" aria-label="Loading claims" className="flex flex-col gap-2">
             <span className="sr-only">Loading claims…</span>
+            {Array.from({ length: 5 }).map((_, i) => (
+              <SkeletonRow key={i} />
+            ))}
           </div>
         )}
 
@@ -206,12 +203,11 @@ export function ClaimsBoard() {
         )}
 
         {!loading && !error && localClaims.length === 0 && (
-          <div
-            role="status"
-            className="rounded-md border border-gray-200 bg-gray-50 px-4 py-12 text-center text-sm text-gray-500"
-          >
-            No claims match the current filters.
-          </div>
+          <EmptyState
+            variant="claims"
+            headline="No claims found"
+            description="There are no claims matching the current filters. Try adjusting your search or check back later."
+          />
         )}
 
         {!loading && !error && localClaims.length > 0 && (

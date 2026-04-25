@@ -8,6 +8,10 @@
 
 ## 1. Wasm Drift Detection
 
+See also **[secrets-management-runbook.md](./secrets-management-runbook.md)** for
+secret ownership, rotation cadence, JWT key generation, and leak-response
+steps.
+
 ### What it does
 `WasmDriftService` runs every 6 hours. It fetches the on-chain wasm hash for each
 contract listed in `contracts/deployment-registry.json`, compares it to the
@@ -74,6 +78,8 @@ curl -X POST https://staging-api.example.com/admin/maintenance/check-wasm-drift 
 
 ## 3. Privacy Requests (Anonymization / Deletion)
 
+See also **[privacy-runbook.md](./privacy-runbook.md)** for soft-delete behaviour, `DATA_RETENTION_DAYS`, and the scheduled purge of materialized rows (`raw_events` remains append-only).
+
 ### Scope and immutability limits
 
 > **Do not promise on-chain erasure to users.**  
@@ -85,7 +91,7 @@ curl -X POST https://staging-api.example.com/admin/maintenance/check-wasm-drift 
 |---|---|---|
 | PostgreSQL `claims` rows | Yes | Anonymize description/images or delete unfinalized rows |
 | PostgreSQL `policies` rows | Yes | Anonymize (retain for audit); deletion requires legal sign-off |
-| PostgreSQL `votes` rows | No — audit integrity | Retained; not deleted |
+| PostgreSQL `votes` rows | Yes (soft-delete) | Logical delete with policy; hard-delete after retention |
 | PostgreSQL `raw_events` rows | No — audit integrity | Retained; not deleted |
 | Stellar ledger (on-chain) | **Immutable** | None |
 | IPFS-pinned files | **Immutable** (public network) | Local unpin only |
@@ -140,7 +146,7 @@ psql $DATABASE_URL -c "SELECT id, description FROM claims WHERE creator_address 
 
 ## 4. Quarterly Restore / Backup Drill
 
-Cross-link: see backup issue for full restore procedure.
+Cross-link: see **[disaster-recovery-runbook.md](./disaster-recovery-runbook.md)** for RPO/RTO targets, the full restore procedure, Redis loss windows, IAM scope, and quarterly ticket template.
 
 Ops calendar entry: **first Monday of each quarter**.
 
@@ -149,7 +155,7 @@ Checklist:
 - [ ] Verify `wasm_drift_alerts` and `privacy_requests` tables present and populated
 - [ ] Re-run wasm drift check against staging contract
 - [ ] Confirm audit log is append-only (attempt UPDATE/DELETE → expect permission denied)
-- [ ] Record drill completion in ops calendar with timestamp and engineer sign-off
+- [ ] Record drill completion in ops calendar, [`recovery-drill-log.md`](./recovery-drill-log.md), and the quarterly drill ticket with timestamp and engineer sign-off
 
 ---
 
@@ -162,3 +168,74 @@ Checklist:
 | Privacy request SLA | `privacy_requests.completed_at - created_at` | Per request; reviewed quarterly |
 | Backup/restore drill | Ops calendar + this runbook sign-off | Quarterly |
 | Audit log integrity | `admin_audit_logs` (append-only, no UPDATE/DELETE grants) | Continuous |
+
+---
+
+## 6. Permissionless keepers (`process_expired` / `process_deadline`)
+
+### What they do
+- **`process_expired(holder, policy_id)`** — After ledger `>= end_ledger + grace_period_ledgers`, marks the policy inactive (if still active, no open claim), updates voter registry like a lapse, and emits `policy_expired`. **No signer required.** `holder` is only the storage key (same as `get_policy`).
+- **`process_deadline(claim_id)`** — Same finalization rules as `finalize_claim` once `now > voting_deadline_ledger`, but only while the claim is still in base **`Processing`**; returns `CalculatorPaused` if `claims_paused` is set instead of panicking. **No signer required.**
+
+Neither entrypoint can approve a claim without quorum math, change vote tallies, or pay out; they only apply deterministic transitions when on-chain conditions already hold.
+
+### Recommended cadence
+- **Claims:** Poll or stream ledgers; for each open claim with `voting_deadline_ledger < current_ledger`, submit `process_deadline`. Typical spacing: every ledger, or every 1–5 ledgers if batching simulations (~5 s target per ledger on Mainnet).
+- **Policies:** For each tracked `(holder, policy_id)` (from indexer), call `process_expired` once `current_ledger >= end_ledger + grace`. Daily or weekly scans are enough if the indexer backfills; tighter cadence improves UI accuracy for “lapsed” state.
+
+### Incentives
+There is **no protocol reward** for keepers; operators run them to support product liveness (deadlines, lapsed flags) and their own UX. Use a dedicated funded account only for network fees.
+
+### Failure modes
+- `process_expired`: reverts with `PolicyLapseNotReached` until grace end; `OpenClaimsMustFinalize` if a claim is still open on that policy.
+- `process_deadline`: reverts with `VotingWindowStillOpen` until after the voting deadline ledger; `ClaimAlreadyTerminal` if already finalized; `ClaimNotProcessing` if the claim left `Processing` without being terminal (e.g. appeal flows); `CalculatorPaused` while claims are paused (unlike `finalize_claim`, which panics on pause).
+
+---
+
+## N. Admin Policy Termination with Open Claims (`allow_open_claims = true`)
+
+### Overview
+
+The `admin_terminate_policy` entrypoint accepts an `allow_open_claims` flag that,
+when set to `true`, terminates a policy even if a claim is currently in `Processing`.
+This is a **privileged governance action** with documented risks.
+
+### When to use
+
+Only use `allow_open_claims = true` when:
+
+1. The policy must be terminated immediately (e.g., confirmed fraud, regulatory action).
+2. The DAO has been notified and accepts that the in-flight claim will resolve independently.
+3. Legal has confirmed the termination does not violate the holder's claim rights.
+
+### What happens on-chain
+
+- The policy is set `is_active = false` immediately.
+- The `PolicyTerminated` event is emitted with `open_claim_bypass = 1` and `open_claims > 0`
+  as the on-chain warning signal for indexers and operators.
+- The in-flight claim vote **can still complete** after termination:
+  - If **approved**: `process_claim` can still execute the payout (payout guard checks
+    claim status, not policy status).
+  - If **rejected**: `on_reject` fires `ClaimRejected` and `StrikeIncremented` for
+    auditability, but **skips** `PolicyDeactivated` (policy already inactive).
+- Strike count is incremented on rejection even though the policy is inactive.
+- The `termination_reason` set at termination time is preserved; it is never overwritten
+  by `ExcessiveRejections` from a subsequent rejection.
+
+### Risks
+
+| Risk | Mitigation |
+|---|---|
+| Holder loses claim rights if vote is manipulated post-termination | DAO snapshot is frozen at `file_claim`; admin cannot alter voter eligibility |
+| Double-deactivation event spam | `on_reject` checks `policy.is_active` before emitting `PolicyDeactivated` |
+| Approved claim payout blocked | `process_claim` is gated on claim status only; payout proceeds normally |
+| Operator error (wrong policy) | Require two-step confirmation (propose + confirm) via `propose_admin_action` |
+
+### Recommended procedure
+
+1. Confirm the policy ID and holder address on a second channel.
+2. Notify the DAO via governance forum before executing.
+3. Call `admin_terminate_policy` with `allow_open_claims = true` from a multisig account.
+4. Monitor the `PolicyTerminated` event in the indexer for `open_claim_bypass = 1`.
+5. Track the in-flight claim to resolution; ensure payout or rejection is processed.
+6. Document the action in the audit log with reason code and DAO approval reference.

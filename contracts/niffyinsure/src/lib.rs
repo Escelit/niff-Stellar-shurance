@@ -2,11 +2,12 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod admin;
+pub mod events;
 mod calculator;
 mod claim;
-pub mod events;
 mod governance_token;
 mod ledger;
+mod rolling_claim_cap;
 mod policy;
 mod policy_lifecycle;
 pub mod premium;
@@ -25,8 +26,9 @@ use soroban_sdk::{contract, contractevent, contractimpl, panic_with_error, Addre
 
 #[contract]
 pub struct NiffyInsure;
-pub use admin::AdminError;
+pub use admin::{AdminAction, AdminError, PendingAdminAction};
 pub use policy::RenewalError;
+pub use policy_lifecycle::PolicyError;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[soroban_sdk::contracterror]
@@ -48,6 +50,13 @@ struct AllowedAssetUpdated {
 struct VotingDurationUpdated {
     pub old_ledgers: u32,
     pub new_ledgers: u32,
+}
+
+#[contractevent(topics = ["niffyinsure", "quorum_updated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QuorumUpdated {
+    pub old_bps: u32,
+    pub new_bps: u32,
 }
 
 #[contractevent(topics = ["niffyinsure", "pause_toggled"])]
@@ -76,11 +85,25 @@ impl NiffyInsure {
         storage::set_multiplier_table(&env, &premium::default_multiplier_table(&env));
         storage::set_allowed_asset(&env, &token, true);
         storage::set_voting_duration_ledgers(&env, ledger::VOTE_WINDOW_LEDGERS);
+        storage::set_quorum_bps(&env, types::DEFAULT_QUORUM_BPS);
         Ok(())
     }
 
     pub fn get_admin(env: Env) -> Address {
         storage::get_admin(&env)
+    }
+
+    /// Returns the semver version string stamped at build time from `Cargo.toml`.
+    /// Read-only: no storage access, no auth required. Safe to call via simulation.
+    pub fn version(env: Env) -> soroban_sdk::String {
+        soroban_sdk::String::from_str(&env, env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Read-only: balance of the default payout token held by this contract (payout reserve).
+    /// Matches funds available for `process_claim` for the configured default asset.
+    pub fn get_treasury_balance(env: Env) -> i128 {
+        let token_addr = storage::get_token(&env);
+        crate::token::get_balance(&env, &token_addr)
     }
 
     /// Pure quote path: reads config and computes premium only.
@@ -147,6 +170,10 @@ impl NiffyInsure {
             41 => validate::Error::NotEligibleVoter,
             42 => validate::Error::RateLimitExceeded,
             49 => validate::Error::VotingDurationOutOfBounds,
+            50 => validate::Error::PolicyBatchTooLarge,
+            51 => validate::Error::VoterSnapshotExpired,
+            52 => validate::Error::NonceMismatch,
+            53 => validate::Error::ClaimNotProcessing,
             _ => validate::Error::ClaimNotApproved,
         };
         policy::map_quote_error(&env, err)
@@ -183,10 +210,21 @@ impl NiffyInsure {
         policy_id: u32,
         amount: i128,
         details: soroban_sdk::String,
-        image_urls: Vec<soroban_sdk::String>,
+        evidence: Vec<types::ClaimEvidenceEntry>,
+        expected_nonce: Option<u64>,
     ) -> Result<u64, validate::Error> {
         holder.require_auth();
-        claim::file_claim(&env, &holder, policy_id, amount, &details, &image_urls)
+        claim::file_claim(&env, &holder, policy_id, amount, &details, &evidence, expected_nonce)
+    }
+
+    /// Claimant-only: withdraw before any vote is cast (`Processing`, zero tallies).
+    pub fn withdraw_claim(
+        env: Env,
+        claimant: Address,
+        claim_id: u64,
+    ) -> Result<(), validate::Error> {
+        claimant.require_auth();
+        claim::withdraw_claim(&env, &claimant, claim_id)
     }
 
     pub fn vote_on_claim(
@@ -199,8 +237,32 @@ impl NiffyInsure {
         claim::vote_on_claim(&env, &voter, claim_id, &vote)
     }
 
+    /// Permissionless keeper hook: bump persistent TTL for the claim voter snapshot.
+    /// Does not alter eligibility or tallies.
+    pub fn refresh_snapshot(env: Env, claim_id: u64) -> Result<(), validate::Error> {
+        claim::refresh_snapshot(&env, claim_id)
+    }
+
     pub fn finalize_claim(env: Env, claim_id: u64) -> Result<types::ClaimStatus, validate::Error> {
         claim::finalize_claim(&env, claim_id)
+    }
+
+    /// Permissionless keeper: deactivate policy after `end_ledger + grace_period_ledgers`.
+    /// `holder` identifies the policy record (no authentication).
+    pub fn process_expired(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+    ) -> Result<(), policy_lifecycle::PolicyError> {
+        policy_lifecycle::process_expired(&env, holder, policy_id)
+    }
+
+    /// Permissionless keeper: finalize claim when past `voting_deadline_ledger` (same rules as `finalize_claim`).
+    pub fn process_deadline(
+        env: Env,
+        claim_id: u64,
+    ) -> Result<types::ClaimStatus, validate::Error> {
+        claim::process_deadline(&env, claim_id)
     }
 
     pub fn get_claim_history(
@@ -222,6 +284,31 @@ impl NiffyInsure {
         admin.require_auth();
         ledger::validate_voting_duration_ledgers(ledgers)?;
         storage::set_voting_duration_ledgers(&env, ledgers);
+        Ok(())
+    }
+
+    /// Participation quorum in basis points (1–10_000). Applies to **new** claims only;
+    /// each claim stores a snapshot at `file_claim` so `Processing` claims keep their `quorum_bps`.
+    pub fn get_quorum_bps(env: Env) -> u32 {
+        storage::get_quorum_bps(&env)
+    }
+
+    /// Basis points snapshot for this claim (immutable after filing).
+    pub fn get_claim_quorum_bps(env: Env, claim_id: u64) -> u32 {
+        storage::get_claim_quorum_bps(&env, claim_id)
+    }
+
+    pub fn admin_set_quorum_bps(env: Env, quorum_bps: u32) -> Result<(), validate::Error> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        validate::validate_quorum_bps(quorum_bps)?;
+        let old = storage::get_quorum_bps(&env);
+        storage::set_quorum_bps(&env, quorum_bps);
+        QuorumUpdated {
+            old_bps: old,
+            new_bps: quorum_bps,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -302,6 +389,7 @@ impl NiffyInsure {
                     claim_id: c.claim_id,
                     policy_id: c.policy_id,
                     amount: c.amount,
+                    deductible: c.deductible,
                     status: c.status,
                     filed_at: c.filed_at,
                     voting_deadline_ledger: c.voting_deadline_ledger,
@@ -370,7 +458,7 @@ impl NiffyInsure {
         safety_score: u32,
         base_amount: i128,
         asset: Address,
-        beneficiary: Option<Address>,
+        opts: types::InitiatePolicyOptions,
     ) -> Result<types::Policy, policy::PolicyError> {
         policy::initiate_policy(
             &env,
@@ -382,7 +470,9 @@ impl NiffyInsure {
             safety_score,
             base_amount,
             asset,
-            beneficiary,
+            opts.beneficiary,
+            opts.deductible,
+            opts.expected_nonce,
         )
     }
 
@@ -471,6 +561,56 @@ impl NiffyInsure {
         storage::get_active_policy_count(&env, &holder)
     }
 
+    /// Read-only: current replay-protection nonce for `holder`.
+    /// Pass this value as `expected_nonce` in the next `initiate_policy` or `file_claim`
+    /// call to enable nonce checking. Nonce starts at 0 and increments on each
+    /// successful mutating call where `expected_nonce` was supplied.
+    pub fn get_nonce(env: Env, holder: Address) -> u64 {
+        storage::get_holder_nonce(&env, &holder)
+    }
+
+    /// If set, the `end_ledger` for which a [`policy::PolicyExpired`] event was already recorded
+    /// (one row per policy). Indexers may use this with `get_policy` for idempotency checks.
+    /// Name is shortened to satisfy the 32-char Soroban export limit.
+    pub fn get_pol_exp_evt_end_ledger(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+    ) -> Option<u32> {
+        storage::get_policy_expired_event_end_ledger(&env, &holder, policy_id)
+    }
+
+    /// Keeper hook: when `ledger_sequence >= policy.end_ledger`, emit [`policy::PolicyExpired`]
+    /// once per policy term (see `policy` module docs for notification delay). Reverts if the
+    /// policy does not exist or is not yet expired.
+    pub fn process_expired(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+    ) -> Result<(), policy::PolicyError> {
+        policy::process_expired(&env, holder, policy_id)
+    }
+
+    /// Renew before `end_ledger` (renewal window). If already expired, emits [`policy::PolicyExpired`]
+    /// when due and returns [`types::RenewPolicyOutcome::Lapsed`] in **`Ok`** (see type docs).
+    pub fn renew_policy(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+        age_band: types::AgeBand,
+        coverage_type: types::CoverageType,
+        safety_score: u32,
+    ) -> Result<types::RenewPolicyOutcome, policy::PolicyError> {
+        policy::renew_policy(
+            &env,
+            holder,
+            policy_id,
+            age_band,
+            coverage_type,
+            safety_score,
+        )
+    }
+
     pub fn terminate_policy(
         env: Env,
         holder: Address,
@@ -510,8 +650,29 @@ impl NiffyInsure {
         admin::cancel_admin(&env);
     }
 
-    pub fn set_token(env: Env, new_token: Address) {
+    /// Propose a high-risk admin action for two-step confirmation.
+    pub fn propose_admin_action(env: Env, action: AdminAction) {
+        admin::propose_admin_action(&env, action);
+    }
+
+    /// Confirm and execute pending admin action (second signer auth).
+    pub fn confirm_admin_action(env: Env, confirmer: Address) {
+        confirmer.require_auth();
+        admin::confirm_admin_action(&env, confirmer);
+    }
+
+    /// Cancel pending admin action (proposer auth).
+    pub fn cancel_admin_action(env: Env) {
+        admin::cancel_admin_action(&env);
+    }
+
+pub fn set_token(env: Env, new_token: Address) {
         admin::set_token(&env, new_token);
+    }
+
+    /// *** DEPRECATED single-step *** Use propose_admin_action(TreasuryRotation) for protected rotation.
+    pub fn set_treasury(env: Env, new_treasury: Address) {
+        admin::set_treasury(&env, new_treasury);
     }
 
     pub fn set_treasury(env: Env, new_treasury: Address) {
@@ -557,6 +718,30 @@ impl NiffyInsure {
     /// Get current sweep cap (None if not set).
     pub fn get_sweep_cap(env: Env) -> Option<i128> {
         storage::get_sweep_cap(&env)
+    }
+
+    /// Set the on-chain notice period (in ledgers) that must elapse between a sweep
+    /// proposal and its execution. 0 = disabled. Admin-only.
+    /// Recommended mainnet value: 2880 (~4 hours at 5s/ledger).
+    pub fn set_sweep_notice_period(env: Env, ledgers: u32) {
+        admin::set_sweep_notice_period(&env, ledgers);
+    }
+
+    /// Get the current sweep notice period in ledgers (0 = disabled).
+    pub fn get_sweep_notice_period(env: Env) -> u32 {
+        storage::get_sweep_notice_period_ledgers(&env)
+    }
+
+    /// Admin-only: set the maximum number of evidence entries per claim.
+    /// Hard max is [`storage::MAX_EVIDENCE_COUNT_HARD_MAX`] (20).
+    /// Reductions do NOT retroactively invalidate existing claims.
+    pub fn admin_set_max_evidence_count(env: Env, new_count: u32) -> Result<(), AdminError> {
+        admin::set_max_evidence_count(&env, new_count)
+    }
+
+    /// Read the current max evidence count (falls back to compile-time default when unset).
+    pub fn get_max_evidence_count(env: Env) -> u32 {
+        storage::get_max_evidence_count(&env)
     }
 
     // ═════════════════════════════════════════════════════════════════════════════
@@ -659,6 +844,51 @@ impl NiffyInsure {
     pub fn get_pause_flags(env: Env) -> storage::PauseFlags {
         storage::get_pause_flags(&env)
     }
+
+    // ── Rolling claim cap (ledger-window cumulative paid per policy) ─────────
+
+    /// Global rolling cap on **paid** claim amounts per policy per ledger window (gross `claim.amount`).
+    /// `i128::MAX` means effectively uncapped.
+    pub fn get_rolling_claim_cap(env: Env) -> i128 {
+        storage::get_rolling_claim_cap(&env)
+    }
+
+    /// Ledger length of each rolling window bucket (aligned to `ledger_sequence / window`).
+    pub fn get_rolling_claim_window_ledgers(env: Env) -> u32 {
+        storage::get_rolling_claim_window_ledgers(&env)
+    }
+
+    /// Remaining amount that can be **filed** this window before hitting the cap (`0` if at/over cap).
+    /// Indexers can combine with cap and `get_rolling_claim_state` for full UI.
+    pub fn get_rolling_claim_remaining(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+    ) -> i128 {
+        let now = env.ledger().sequence();
+        rolling_claim_cap::remaining_under_cap(&env, &holder, policy_id, now)
+    }
+
+    /// Raw rolling state for `(holder, policy_id)` if present (window bucket + cumulative paid).
+    pub fn get_rolling_claim_state(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+    ) -> Option<types::RollingClaimWindowState> {
+        storage::get_rolling_claim_state(&env, &holder, policy_id)
+    }
+
+    /// Admin: set rolling claim cap. Bounded unless `i128::MAX` (uncapped). Emits `ClaimCapUpdated`.
+    pub fn set_rolling_claim_cap(env: Env, new_cap: i128) -> Result<(), AdminError> {
+        let _admin = admin::require_admin(&env);
+        rolling_claim_cap::try_set_cap(&env, new_cap)
+    }
+
+    /// Admin: set rolling window length in ledgers. Emits `RollingClaimWindowLedgersUpdated`.
+    pub fn set_rolling_claim_window_ledgers(env: Env, window_ledgers: u32) -> Result<(), AdminError> {
+        let _admin = admin::require_admin(&env);
+        rolling_claim_cap::try_set_window_ledgers(&env, window_ledgers)
+    }
 }
 
 /// Governance token: reserved entrypoints only when built with `--features governance-token`.
@@ -714,6 +944,7 @@ impl NiffyInsure {
             start_ledger: 1,
             end_ledger,
             asset: token,
+            deductible: None,
             beneficiary: None,
             terminated_at_ledger: 0,
             termination_reason: TerminationReason::None,
