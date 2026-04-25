@@ -1,12 +1,14 @@
-import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
+import { Module, MiddlewareConsumer, NestModule, RequestMethod } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TerminusModule } from '@nestjs/terminus';
 import { ThrottlerModule, ThrottlerStorage } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
-import { validationSchema } from './config/env.validation';
+import { validateEnvironment } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { CacheModule } from './cache/cache.module';
+import { RedisService } from './cache/redis.service';
+import { RedisThrottlerStorage } from './common/guards/throttler-redis.storage';
 import { RpcModule } from './rpc/rpc.module';
 import { IndexerModule } from './indexer/indexer.module';
 import { IpfsModule } from './ipfs/ipfs.module';
@@ -21,20 +23,30 @@ import { ChainModule } from './chain/chain.module';
 import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
 import { MetricsModule } from './metrics/metrics.module';
 import { TenantModule } from './tenant/tenant.module';
+import { GraphqlApiModule } from './graphql/graphql.module';
+import { MaintenanceModule } from './maintenance/maintenance.module';
+import { EventsModule } from './events/events.module';
 import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
 import { AppLoggerService } from './common/logger/app-logger.service';
 import { OracleHooksController } from './experimental/oracle-hooks.controller';
 import { BetaCalculatorsController } from './experimental/beta-calculators.controller';
 import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
 
+/** Mutation routes that require idempotency key support (issue #363). */
+const IDEMPOTENCY_ROUTES = [
+  { path: 'claims', method: RequestMethod.POST },
+  { path: 'policies', method: RequestMethod.POST },
+  { path: 'tx/submit', method: RequestMethod.POST },
+];
+
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '.env',
-      validationSchema,
+      validate: validateEnvironment,
       validationOptions: {
-        abortEarly: true,
+        abortEarly: false,
       },
     }),
     ThrottlerModule.forRootAsync({
@@ -66,6 +78,9 @@ import { IdempotencyMiddleware } from './common/middleware/idempotency.middlewar
     FeatureFlagsModule,
     MetricsModule,
     TenantModule,
+    GraphqlApiModule,
+    MaintenanceModule,
+    EventsModule,
   ],
   controllers: [OracleHooksController, BetaCalculatorsController],
   providers: [RequestContextMiddleware, AppLoggerService],
@@ -73,5 +88,7 @@ import { IdempotencyMiddleware } from './common/middleware/idempotency.middlewar
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     consumer.apply(RequestContextMiddleware).forRoutes('*');
+    // Apply idempotency middleware to all mutation endpoints (issue #363)
+    consumer.apply(IdempotencyMiddleware).forRoutes(...IDEMPOTENCY_ROUTES);
   }
 }

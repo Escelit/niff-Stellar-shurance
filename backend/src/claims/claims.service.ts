@@ -4,57 +4,45 @@ import { Prisma } from '@prisma/client';
 import { SorobanService } from '../rpc/soroban.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../cache/redis.service';
-import { SanitizationService } from './sanitization.service';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { claimTenantWhere, assertTenantOwnership } from '../tenant/tenant-filter.helper';
+import { ReconciliationService } from '../indexer/reconciliation.service';
+import { ClaimAggregationService } from './services/claim-aggregation.service';
 import {
   ClaimDetailResponseDto,
-  ClaimMetadataDto,
   ClaimsListResponseDto,
-  ConsistencyMetadataDto,
-  DeadlineDto,
-  QuorumProgressDto,
-  SanitizedEvidenceDto,
-  VoteTalliesDto,
 } from './dto/claim.dto';
 import {
   buildKeysetWhere,
   buildNextCursor,
   clampLimit,
 } from '../helpers/pagination';
+import { ClaimViewMapper } from './claim-view.mapper';
 
-interface ListClaimsParams {
+export interface ListClaimsParams {
   after?: string;
   limit?: number;
   status?: string;
 }
 
-const VOTE_WINDOW_LEDGERS = 120_960;
-const SECONDS_PER_LEDGER = 5;
-
-type ClaimWithVotes = Prisma.ClaimGetPayload<{
-  include: {
-    votes: { select: { vote: true } };
-  };
-}>;
-
 @Injectable()
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
   private readonly cacheTtl: number;
-  private readonly ipfsGateway: string;
-  private readonly maxAcceptableLag = 5;
+  private readonly indexerNetwork: string;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
-    private readonly sanitization: SanitizationService,
+    private readonly claimViewMapper: ClaimViewMapper,
     private readonly config: ConfigService,
     private readonly soroban: SorobanService,
     private readonly tenantCtx: TenantContextService,
+    private readonly reconciliation: ReconciliationService,
+    private readonly aggregation: ClaimAggregationService,
   ) {
     this.cacheTtl = this.config.get<number>('CACHE_TTL_SECONDS', 60);
-    this.ipfsGateway = this.config.get<string>('IPFS_GATEWAY', 'https://ipfs.io');
+    this.indexerNetwork = this.config.get<string>('STELLAR_NETWORK', 'testnet');
   }
 
   async listClaims(params: ListClaimsParams): Promise<ClaimsListResponseDto> {
@@ -82,7 +70,9 @@ export class ClaimsService {
     const [claims, total] = await Promise.all([
       this.prisma.claim.findMany({
         where,
-        include: { votes: { select: { vote: true } } },
+        include: {
+          votes: { where: { deletedAt: null }, select: { vote: true } },
+        },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
       }),
@@ -90,7 +80,16 @@ export class ClaimsService {
     ]);
 
     const response: ClaimsListResponseDto = {
-      data: claims.map((claim) => this.transformClaim(claim, lastLedger)),
+      data: await Promise.all(
+        claims.map(async (claim) => {
+          const agg = await this.aggregation.aggregate(claim.id, lastLedger);
+          return this.claimViewMapper.transformClaim(claim, lastLedger, {
+            quorum_progress_pct: agg.quorum_progress_pct,
+            votes_needed: agg.votes_needed,
+            deadline_estimate_utc: agg.deadline_estimate_utc,
+          });
+        }),
+      ),
       pagination: {
         next_cursor: buildNextCursor(claims, limit, total),
         total,
@@ -111,7 +110,7 @@ export class ClaimsService {
     const lastLedger = await this.getLastLedger();
 
     const votedClaimIds = await this.prisma.vote.findMany({
-      where: { voterAddress: walletAddress.toLowerCase() },
+      where: { voterAddress: walletAddress.toLowerCase(), deletedAt: null },
       select: { claimId: true },
     });
     const votedIds = votedClaimIds.map((v) => v.claimId);
@@ -126,18 +125,29 @@ export class ClaimsService {
       this.prisma.claim.count({ where: baseWhere }),
       this.prisma.claim.findMany({
         where: { ...baseWhere, ...(keysetWhere ?? {}) },
-        include: { votes: { select: { vote: true } } },
+        include: {
+          votes: { where: { deletedAt: null }, select: { vote: true } },
+        },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: limit,
       }),
     ]);
 
     const openClaims = page.filter(
-      (claim) => this.getVotingDeadlineLedger(claim.createdAtLedger) > lastLedger,
+      (claim) => this.claimViewMapper.getVotingDeadlineLedger(claim.createdAtLedger) > lastLedger,
     );
 
     return {
-      data: openClaims.map((claim) => this.transformClaim(claim, lastLedger)),
+      data: await Promise.all(
+        openClaims.map(async (claim) => {
+          const agg = await this.aggregation.aggregate(claim.id, lastLedger);
+          return this.claimViewMapper.transformClaim(claim, lastLedger, {
+            quorum_progress_pct: agg.quorum_progress_pct,
+            votes_needed: agg.votes_needed,
+            deadline_estimate_utc: agg.deadline_estimate_utc,
+          });
+        }),
+      ),
       pagination: {
         next_cursor: buildNextCursor(openClaims, limit, allOpen),
         total: allOpen,
@@ -156,10 +166,11 @@ export class ClaimsService {
     }
 
     const lastLedger = await this.getLastLedger();
-    const claim = await this.prisma.claim.findUnique({
-      where: { id },
+    const claim = await this.prisma.claim.findFirst({
+      where: claimTenantWhere(tenantId, { id }),
       include: {
         votes: {
+          where: { deletedAt: null },
           select: { vote: true },
         },
       },
@@ -172,7 +183,16 @@ export class ClaimsService {
       throw new NotFoundException(`Claim with ID ${id} not found`);
     }
 
-    const response = this.transformClaim(claim, lastLedger);
+    const agg = await this.aggregation.aggregate(id, lastLedger);
+    const response = this.claimViewMapper.transformClaim(claim, lastLedger, {
+      quorum_progress_pct: agg.quorum_progress_pct,
+      votes_needed: agg.votes_needed,
+      deadline_estimate_utc: agg.deadline_estimate_utc,
+    });
+
+    // Attach reconciliation status so the frontend can show a data-quality warning.
+    const reconStatus = await this.reconciliation.getClaimReconciliationStatus(id);
+    response.consistency.tallyReconciled = reconStatus.ok;
 
     if (!walletAddress) {
       await this.redis.set(cacheKey, response, this.cacheTtl);
@@ -182,94 +202,62 @@ export class ClaimsService {
     return this.enrichWithUserVote(response, walletAddress);
   }
 
-  private async getLastLedger(): Promise<number> {
-    const indexerState = await this.prisma.indexerState.findFirst({
-      orderBy: { lastLedger: 'desc' },
-    });
-    return indexerState?.lastLedger || 0;
-  }
-
-  private transformClaim(claim: ClaimWithVotes, lastLedger: number): ClaimDetailResponseDto {
-    const yesVotes = claim.votes.filter((vote) => vote.vote === 'APPROVE').length;
-    const noVotes = claim.votes.filter((vote) => vote.vote === 'REJECT').length;
-    const totalVotes = yesVotes + noVotes;
-    const votingDeadlineLedger = this.getVotingDeadlineLedger(claim.createdAtLedger);
-    const votingDeadlineTime = new Date(
-      claim.createdAt.getTime() + VOTE_WINDOW_LEDGERS * SECONDS_PER_LEDGER * 1000,
+  async getClaimsByPolicyIds(
+    policyIds: readonly string[],
+    limitPerPolicy: number,
+  ): Promise<Map<string, ClaimDetailResponseDto[]>> {
+    const tenantId = this.tenantCtx.tenantId;
+    const uniquePolicyIds = [...new Set(policyIds)];
+    const results = new Map<string, ClaimDetailResponseDto[]>(
+      uniquePolicyIds.map((policyId) => [policyId, []]),
     );
-    const isOpen = votingDeadlineLedger > lastLedger;
-    const remainingSeconds = isOpen
-      ? (votingDeadlineLedger - lastLedger) * SECONDS_PER_LEDGER
-      : undefined;
-    const requiredVotes = Math.max(1, Math.floor(totalVotes / 2) + 1);
-    const sanitizedHash = this.sanitization.sanitizeIpfsHash(
-      this.extractEvidenceHash(claim.imageUrls),
-    );
-    const indexerLag = Math.max(0, lastLedger - claim.updatedAtLedger);
 
-    return {
-      metadata: {
-        id: claim.id,
-        policyId: claim.policyId,
-        creatorAddress: this.sanitization.sanitizeWalletAddress(claim.creatorAddress),
-        status: claim.status.toLowerCase() as 'pending' | 'approved' | 'paid' | 'rejected',
-        amount: claim.amount,
-        description: claim.description
-          ? this.sanitization.sanitizeDescription(claim.description)
-          : undefined,
-        evidenceHash: sanitizedHash,
-        createdAtLedger: claim.createdAtLedger,
-        createdAt: claim.createdAt,
-        updatedAt: claim.updatedAt,
-      } as ClaimMetadataDto,
-      votes: {
-        yesVotes,
-        noVotes,
-        totalVotes,
-      } as VoteTalliesDto,
-      quorum: {
-        required: requiredVotes,
-        current: totalVotes,
-        percentage: Math.min(100, Math.round((totalVotes / requiredVotes) * 100)),
-        reached: claim.isFinalized || Math.max(yesVotes, noVotes) >= requiredVotes,
-      } as QuorumProgressDto,
-      deadline: {
-        votingDeadlineLedger,
-        votingDeadlineTime,
-        isOpen,
-        remainingSeconds,
-      } as DeadlineDto,
-      evidence: {
-        gatewayUrl: sanitizedHash ? `${this.ipfsGateway}/ipfs/${sanitizedHash}` : '',
-        hash: sanitizedHash,
-      } as SanitizedEvidenceDto,
-      consistency: {
-        isFinalized: claim.isFinalized,
-        indexerLag,
-        lastIndexedLedger: lastLedger,
-        isStale: indexerLag > this.maxAcceptableLag,
-      } as ConsistencyMetadataDto,
-    };
-  }
-
-  private getVotingDeadlineLedger(createdAtLedger: number): number {
-    return createdAtLedger + VOTE_WINDOW_LEDGERS;
-  }
-
-  private extractEvidenceHash(imageUrls: string[]): string {
-    for (const imageUrl of imageUrls) {
-      const directHash = this.sanitization.sanitizeIpfsHash(imageUrl);
-      if (directHash) {
-        return directHash;
-      }
-
-      const match = imageUrl.match(/\/ipfs\/([^/?#]+)/i);
-      if (match?.[1]) {
-        return match[1];
-      }
+    if (uniquePolicyIds.length === 0) {
+      return results;
     }
 
-    return '';
+    const lastLedger = await this.getLastLedger();
+    const claims = await this.prisma.claim.findMany({
+      where: claimTenantWhere(tenantId, {
+        policyId: { in: uniquePolicyIds },
+      }),
+      include: {
+        votes: {
+          where: { deletedAt: null },
+          select: { vote: true },
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+
+    for (const claim of claims) {
+      const bucket = results.get(claim.policyId);
+      if (!bucket || bucket.length >= limitPerPolicy) {
+        continue;
+      }
+
+      const agg = await this.aggregation.aggregate(claim.id, lastLedger);
+      bucket.push(this.claimViewMapper.transformClaim(claim, lastLedger, {
+        quorum_progress_pct: agg.quorum_progress_pct,
+        votes_needed: agg.votes_needed,
+        deadline_estimate_utc: agg.deadline_estimate_utc,
+      }));
+    }
+
+    return results;
+  }
+
+  private async getLastLedger(): Promise<number> {
+    const cursor = await this.prisma.ledgerCursor.findUnique({
+      where: { network: this.indexerNetwork },
+    });
+    if (cursor) {
+      return cursor.lastProcessedLedger;
+    }
+    const legacy = await this.prisma.indexerState.findFirst({
+      orderBy: { lastLedger: 'desc' },
+    });
+    return legacy?.lastLedger ?? 0;
   }
 
   private async enrichWithUserVote(
@@ -280,6 +268,7 @@ export class ClaimsService {
       where: {
         claimId: claim.metadata.id,
         voterAddress: walletAddress.toLowerCase(),
+        deletedAt: null,
       },
     });
 
@@ -307,7 +296,7 @@ export class ClaimsService {
     policyId: number;
     amount: bigint;
     details: string;
-    imageUrls: string[];
+    evidence: { url: string; contentSha256Hex: string }[];
   }) {
     return this.soroban.buildFileClaimTransaction(args);
   }
@@ -336,8 +325,9 @@ export class ClaimsService {
     const numericIds = claimIds.map(Number).filter((n) => !isNaN(n));
     if (numericIds.length === 0) return [];
 
+    const tenantId = this.tenantCtx.tenantId;
     const claims = await this.prisma.claim.findMany({
-      where: { id: { in: numericIds } },
+      where: claimTenantWhere(tenantId, { id: { in: numericIds } }),
       select: { id: true, status: true, updatedAt: true },
     });
 

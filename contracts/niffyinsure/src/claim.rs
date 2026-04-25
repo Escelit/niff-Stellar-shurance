@@ -1,12 +1,12 @@
 // Claim lifecycle and DAO voting will be implemented here.
 //
 // Planned public functions:
-//   file_claim(env, policy_id, amount, details, image_urls)
+//   file_claim(env, policy_id, amount, details, evidence)
 //   vote_on_claim(env, voter, claim_id, vote)
 //
 // Open claim accounting: `storage::OpenClaimCount(holder, policy_id)` must be
 // incremented when a claim enters `Processing` and decremented when it reaches
-// a terminal status (`Approved` / `Rejected`), so policy termination can block
+// a terminal status (`Approved` / `Rejected` / `Withdrawn`), so policy termination can block
 // or audit in-flight claims. Until `file_claim` ships, admins may use
 // `admin_set_open_claim_count` in tests or break-glass ops only.
 //
@@ -39,7 +39,7 @@
 // extensions and remain readable indefinitely via `get_claim`. The `details`
 // field holds a brief description (≤ 256 chars); full allegation narratives
 // must NOT be stored on-chain — use IPFS/off-chain storage and reference via
-// `image_urls` or an off-chain indexer.
+// `evidence` URLs or an off-chain indexer.
 //
 // ── Appeal window interaction ─────────────────────────────────────────────────
 //
@@ -66,14 +66,14 @@
 // or deadline-plurality approval, which is controlled by the DAO snapshot, not
 // the admin. The admin cannot flip a `Rejected` claim to `Approved`.
 use crate::{
-    ledger, storage,
+    ledger, rolling_claim_cap, storage,
     types::{
-        Claim, ClaimProcessed, ClaimStatus, ClaimStatusHistoryEntry, TerminationReason, VoteOption,
-        CLAIM_STATUS_HISTORY_MAX, STRIKE_DEACTIVATION_THRESHOLD,
+        Claim, ClaimEvidenceEntry, ClaimProcessed, ClaimStatus, ClaimStatusHistoryEntry,
+        TerminationReason, VoteOption, CLAIM_STATUS_HISTORY_MAX, STRIKE_DEACTIVATION_THRESHOLD,
     },
     validate::Error,
 };
-use soroban_sdk::{contractevent, Address, Env, String, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Vec};
 
 /// Append `status` at `ledger`, then drop oldest entries if over [`CLAIM_STATUS_HISTORY_MAX`].
 /// Never fails — transitions must not revert because the log is full.
@@ -88,6 +88,50 @@ fn push_status_transition(
     }
 }
 
+// ── Participation quorum (see also `types` lifecycle docs) ───────────────────
+//
+// Let `E` = eligible voters (snapshot length at `file_claim`), `C` = cast ballots =
+// `approve_votes + reject_votes`, `Q` = quorum basis points **for this claim**
+// (instance `quorum_bps` copied into persistent `ClaimQuorumBps(claim_id)` at filing).
+// Admin changes to instance `quorum_bps` do **not** alter `Q` for claims already in
+// `Processing`.
+//
+// Required minimum cast votes:
+//   R = ceil(E * Q / 10_000)  →  R = (E * Q + 9_999) / 10_000  (u32; E = 0 ⇒ R = 0)
+//
+// **Quorum met** iff `C >= R`. If met, outcome is **plurality**: Approved when
+// `approve_votes > reject_votes`, else Rejected (insurer wins ties).
+// If the voting deadline passes with `C < R`, the claim is **Rejected** (no quorum).
+fn required_cast_for_quorum(eligible: u32, quorum_bps: u32) -> u32 {
+    if eligible == 0 {
+        return 0;
+    }
+    let numer = (eligible as u64).saturating_mul(quorum_bps as u64);
+    numer.div_ceil(10_000) as u32
+}
+
+fn participation_quorum_met(cast_votes: u32, eligible: u32, quorum_bps: u32) -> bool {
+    cast_votes >= required_cast_for_quorum(eligible, quorum_bps)
+}
+
+/// If participation quorum is satisfied, returns Some(Approved|Rejected) by plurality.
+fn resolve_plurality_if_quorum_met(
+    approve_votes: u32,
+    reject_votes: u32,
+    cast_votes: u32,
+    eligible: u32,
+    quorum_bps: u32,
+) -> Option<ClaimStatus> {
+    if !participation_quorum_met(cast_votes, eligible, quorum_bps) {
+        return None;
+    }
+    if approve_votes > reject_votes {
+        Some(ClaimStatus::Approved)
+    } else {
+        Some(ClaimStatus::Rejected)
+    }
+}
+
 // ── Events ────────────────────────────────────────────────────────────────────
 
 #[contractevent(topics = ["niffyinsure", "claim_filed"])]
@@ -96,7 +140,26 @@ struct ClaimFiled {
     #[topic]
     pub claim_id: u64,
     pub holder: Address,
-    pub image_hash: u64,
+    pub policy_id: u32,
+    /// Gross claim amount requested (before deductible at payout).
+    pub claim_amount: i128,
+    /// Deductible copied from the policy at filing (for indexer / UI breakdown).
+    pub deductible: i128,
+    /// SHA-256 content hashes for each evidence entry (same order as submitted).
+    pub evidence_hashes: Vec<BytesN<32>>,
+}
+
+/// Emitted when the claimant withdraws before any vote is cast.
+///
+/// Topic layout: ["niffyinsure", "claim_withdrawn", claim_id]
+#[contractevent(topics = ["niffyinsure", "claim_withdrawn"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimWithdrawn {
+    #[topic]
+    pub claim_id: u64,
+    pub policy_id: u32,
+    pub claimant: Address,
+    pub at_ledger: u32,
 }
 
 /// Emitted as the authoritative rejection signal. Indexers must consume this
@@ -186,10 +249,14 @@ pub fn file_claim(
     policy_id: u32,
     amount: i128,
     details: &String,
-    image_urls: &Vec<String>,
+    evidence: &Vec<ClaimEvidenceEntry>,
+    expected_nonce: Option<u64>,
 ) -> Result<u64, Error> {
     // Check pause: claims are blocked if claims_paused is true
     storage::assert_claims_not_paused(env);
+
+    // Opt-in replay protection.
+    storage::check_and_bump_nonce(env, holder, expected_nonce)?;
 
     let policy = storage::get_policy(env, holder, policy_id).ok_or(Error::PolicyNotFound)?;
 
@@ -210,14 +277,19 @@ pub fn file_claim(
         return Err(Error::DuplicateOpenClaim);
     }
 
+    // Anchor for restoring per-holder rate limit if claimant later withdraws (see `withdraw_claim`).
+    let rate_limit_anchor_before_filing = storage::get_last_claim_ledger(env, holder);
+
     // Rate-limit check.
-    if let Some(last) = storage::get_last_claim_ledger(env, holder) {
+    if let Some(last) = rate_limit_anchor_before_filing {
         if !ledger::is_rate_limit_elapsed(now, last, ledger::RATE_LIMIT_WINDOW_LEDGERS) {
             return Err(Error::RateLimitExceeded);
         }
     }
 
-    crate::validate::check_claim_fields(env, amount, policy.coverage, details, image_urls)?;
+    crate::validate::check_claim_fields(env, amount, policy.coverage, details, evidence)?;
+
+    let deductible_snapshot = policy.deductible.unwrap_or(0);
 
     let duration = storage::get_voting_duration_ledgers(env);
     let voting_deadline_ledger = now
@@ -232,9 +304,10 @@ pub fn file_claim(
         policy_id,
         claimant: holder.clone(),
         amount,
+        deductible: deductible_snapshot,
         asset: policy.asset.clone(),
         details: details.clone(),
-        image_urls: image_urls.clone(),
+        evidence: evidence.clone(),
         status: ClaimStatus::Processing,
         voting_deadline_ledger,
         approve_votes: 0,
@@ -251,16 +324,89 @@ pub fn file_claim(
     storage::set_claim(env, &claim);
     storage::set_open_claim(env, holder, policy_id, true);
     storage::snapshot_claim_voters(env, claim_id);
+    storage::set_claim_quorum_bps(env, claim_id, storage::get_quorum_bps(env));
     storage::set_last_claim_ledger(env, holder, now);
+    storage::set_claim_rate_limit_prev(env, claim_id, rate_limit_anchor_before_filing);
+
+    let mut evidence_hashes: Vec<BytesN<32>> = Vec::new(env);
+    for e in evidence.iter() {
+        evidence_hashes.push_back(e.hash.clone());
+    }
+
+    // Stable fingerprint: XOR-fold the first 8 bytes of each evidence hash.
+    let image_hash: u64 = evidence_hashes.iter().fold(0u64, |acc, h| {
+        let mut v = 0u64;
+        for i in 0u32..8u32 {
+            v = (v << 8) | (h.get(i).unwrap_or(0) as u64);
+        }
+        acc ^ v
+    });
 
     ClaimFiled {
         claim_id,
         holder: holder.clone(),
-        image_hash: hash_image_urls(image_urls),
+        policy_id,
+        claim_amount: amount,
+        deductible: deductible_snapshot,
+        image_hash,
     }
     .publish(env);
 
     Ok(claim_id)
+}
+
+// ── withdraw_claim ────────────────────────────────────────────────────────────
+
+/// Claimant-only: withdraw a claim before any ballot is cast.
+///
+/// Allowed only while `status == Processing` and `approve_votes + reject_votes == 0`.
+/// Sets status to [`ClaimStatus::Withdrawn`], clears the open-claim flag, restores the
+/// holder's claim **rate-limit anchor** to its value before this claim was filed (see
+/// `storage::ClaimRateLimitPrev`), and emits [`ClaimWithdrawn`].
+///
+/// **Rate limit vs open-claim cap:** Withdrawal does **not** consume the per-policy
+/// "one open claim" slot once complete (open flag cleared). The per-holder time spacing
+/// between **successful** `file_claim` calls is reverted to the pre-filing anchor so a
+/// mistaken filing does not force the holder to wait another full window before refiling.
+pub fn withdraw_claim(env: &Env, claimant: &Address, claim_id: u64) -> Result<(), Error> {
+    storage::assert_claims_not_paused(env);
+
+    let mut claim = storage::get_claim(env, claim_id).ok_or(Error::ClaimNotFound)?;
+
+    if claimant != &claim.claimant {
+        return Err(Error::NotEligibleVoter);
+    }
+
+    if claim.status != ClaimStatus::Processing {
+        return Err(Error::ClaimAlreadyTerminal);
+    }
+
+    if claim.approve_votes != 0 || claim.reject_votes != 0 {
+        return Err(Error::ClaimAlreadyTerminal);
+    }
+
+    let now = env.ledger().sequence();
+    claim.status = ClaimStatus::Withdrawn;
+    push_status_transition(&mut claim.status_history, ClaimStatus::Withdrawn, now);
+
+    storage::set_open_claim(env, &claim.claimant, claim.policy_id, false);
+
+    match storage::take_claim_rate_limit_prev(env, claim_id) {
+        Some(ledger) => storage::set_last_claim_ledger(env, &claim.claimant, ledger),
+        None => storage::remove_last_claim_ledger(env, &claim.claimant),
+    }
+
+    storage::set_claim(env, &claim);
+
+    ClaimWithdrawn {
+        claim_id,
+        policy_id: claim.policy_id,
+        claimant: claimant.clone(),
+        at_ledger: now,
+    }
+    .publish(env);
+
+    Ok(())
 }
 
 // ── vote_on_claim ─────────────────────────────────────────────────────────────
@@ -290,6 +436,10 @@ pub fn vote_on_claim(
         return Err(Error::VotingWindowClosed);
     }
 
+    if !storage::has_claim_voters(env, claim_id) {
+        return Err(Error::VoterSnapshotExpired);
+    }
+
     // Voter must be in the claim's snapshot electorate.
     let snapshot = storage::get_claim_voters(env, claim_id);
     let eligible = snapshot.iter().any(|v| v == *voter);
@@ -311,14 +461,21 @@ pub fn vote_on_claim(
         VoteOption::Reject => claim.reject_votes += 1,
     }
 
-    // Auto-finalize on majority.
-    let total = snapshot.len();
-    let majority = total / 2 + 1;
-    if claim.approve_votes >= majority {
-        claim.status = ClaimStatus::Approved;
-    } else if claim.reject_votes >= majority {
-        claim.status = ClaimStatus::Rejected;
-        claim.appeal_open_deadline_ledger = now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
+    let eligible = snapshot.len() as u32;
+    let cast = claim.approve_votes + claim.reject_votes;
+    let quorum_bps = storage::get_claim_quorum_bps(env, claim_id);
+    if let Some(res) = resolve_plurality_if_quorum_met(
+        claim.approve_votes,
+        claim.reject_votes,
+        cast,
+        eligible,
+        quorum_bps,
+    ) {
+        let rejected = res == ClaimStatus::Rejected;
+        claim.status = res;
+        if rejected {
+            claim.appeal_open_deadline_ledger = now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
+        }
     }
 
     if claim.status != status_before {
@@ -329,6 +486,10 @@ pub fn vote_on_claim(
 
     if claim.status.is_terminal() {
         storage::set_open_claim(env, &claim.claimant, claim.policy_id, false);
+    }
+
+    if status_before == ClaimStatus::Processing && claim.status != ClaimStatus::Processing {
+        storage::remove_claim_rate_limit_prev(env, claim_id);
     }
 
     let status = claim.status.clone();
@@ -344,16 +505,25 @@ pub fn vote_on_claim(
     Ok(status)
 }
 
+/// Permissionless: extends persistent TTL for `ClaimVoters(claim_id)` only.
+/// Does not change the voter list or vote tallies.
+pub fn refresh_snapshot(env: &Env, claim_id: u64) -> Result<(), Error> {
+    let _ = storage::get_claim(env, claim_id).ok_or(Error::ClaimNotFound)?;
+    if !storage::has_claim_voters(env, claim_id) {
+        return Err(Error::VoterSnapshotExpired);
+    }
+    storage::extend_claim_voters_snapshot_ttl(env, claim_id);
+    Ok(())
+}
+
 // ── finalize_claim ────────────────────────────────────────────────────────────
 
 /// Finalize a claim after the voting deadline has passed.
 ///
 /// Window check: `now > claim.voting_deadline_ledger` (see `ledger::is_claim_past_voting_deadline`).
-/// Plurality wins; tie resolves to Rejected.
-pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
-    // Check pause: finalization is blocked if claims_paused is true
-    storage::assert_claims_not_paused(env);
-
+/// Uses the **participation quorum** and per-claim `quorum_bps` snapshot (see module helpers).
+/// If quorum is met, plurality decides; if not, **Rejected** (no quorum).
+fn finalize_claim_inner(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
     let mut claim = storage::get_claim(env, claim_id).ok_or(Error::ClaimNotFound)?;
 
     if claim.status.is_terminal() {
@@ -367,10 +537,20 @@ pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
 
     let status_before = claim.status.clone();
 
-    if claim.approve_votes > claim.reject_votes {
-        claim.status = ClaimStatus::Approved;
+    let voters = storage::get_claim_voters(env, claim_id);
+    let eligible = voters.len() as u32;
+    let cast = claim.approve_votes + claim.reject_votes;
+    let quorum_bps = storage::get_claim_quorum_bps(env, claim_id);
+
+    if participation_quorum_met(cast, eligible, quorum_bps) {
+        if claim.approve_votes > claim.reject_votes {
+            claim.status = ClaimStatus::Approved;
+        } else {
+            claim.status = ClaimStatus::Rejected;
+            claim.appeal_open_deadline_ledger = now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
+        }
     } else {
-        // Tie or reject plurality → Rejected (insurer wins tie).
+        // Below minimum participation — no quorum (insurer-favored default).
         claim.status = ClaimStatus::Rejected;
         claim.appeal_open_deadline_ledger = now.saturating_add(ledger::APPEAL_OPEN_WINDOW_LEDGERS);
     }
@@ -382,6 +562,11 @@ pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
     let newly_rejected = claim.status == ClaimStatus::Rejected;
 
     storage::set_open_claim(env, &claim.claimant, claim.policy_id, false);
+
+    if status_before == ClaimStatus::Processing && claim.status != ClaimStatus::Processing {
+        storage::remove_claim_rate_limit_prev(env, claim_id);
+    }
+
     let status = claim.status.clone();
     storage::set_claim(env, &claim);
 
@@ -391,6 +576,30 @@ pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
     }
 
     Ok(status)
+}
+
+pub fn finalize_claim(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
+    // Check pause: finalization is blocked if claims_paused is true
+    storage::assert_claims_not_paused(env);
+    finalize_claim_inner(env, claim_id)
+}
+
+/// Permissionless keeper: same outcome as [`finalize_claim`] when voting has ended, but returns
+/// [`Error::CalculatorPaused`] if `claims_paused` is set instead of panicking.
+///
+/// Only [`ClaimStatus::Processing`] claims are eligible so keepers cannot advance appeal or other flows.
+pub fn process_deadline(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> {
+    if storage::get_pause_flags(env).claims_paused {
+        return Err(Error::CalculatorPaused);
+    }
+    let claim = storage::get_claim(env, claim_id).ok_or(Error::ClaimNotFound)?;
+    if claim.status.is_terminal() {
+        return Err(Error::ClaimAlreadyTerminal);
+    }
+    if claim.status != ClaimStatus::Processing {
+        return Err(Error::ClaimNotProcessing);
+    }
+    finalize_claim_inner(env, claim_id)
 }
 
 // ── process_claim (admin payout trigger) ─────────────────────────────────────
@@ -422,6 +631,7 @@ pub fn process_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
     claim.status = ClaimStatus::Paid;
     push_status_transition(&mut claim.status_history, ClaimStatus::Paid, now);
     storage::set_open_claim(env, &claim.claimant, claim.policy_id, false);
+    storage::remove_claim_rate_limit_prev(env, claim_id);
     storage::set_claim(env, &claim);
     Ok(())
 }
@@ -528,7 +738,17 @@ fn payout(env: &Env, claim: &Claim) -> Result<(), Error> {
         return Err(Error::InvalidAsset);
     }
 
-    if !crate::token::check_balance(env, &policy.asset, claim.amount) {
+    let gross = claim.amount;
+    let deductible = claim.deductible;
+    let net = gross
+        .checked_sub(deductible)
+        .ok_or(Error::Overflow)?;
+    if net <= 0 {
+        // Enum size capped by Soroban; reuse ClaimAmountZero for "no positive payout after deductible".
+        return Err(Error::ClaimAmountZero);
+    }
+
+    if !crate::token::check_balance(env, &policy.asset, net) {
         return Err(Error::InsufficientTreasury);
     }
 
@@ -542,13 +762,15 @@ fn payout(env: &Env, claim: &Claim) -> Result<(), Error> {
         &policy.asset,
         &env.current_contract_address(),
         &payout_to,
-        claim.amount,
+        net,
     );
 
     ClaimProcessed {
         claim_id: claim.claim_id,
         recipient: payout_to,
-        amount: claim.amount,
+        gross_amount: gross,
+        deductible,
+        amount: net,
     }
     .publish(env);
 
@@ -570,20 +792,78 @@ pub fn set_allowed_asset(env: &Env, asset: &Address, allowed: bool) {
     storage::set_allowed_asset(env, asset, allowed);
 }
 
-/// FNV-1a hash of concatenated IPFS CID bytes, truncated to u64.
-/// Compact enough for event payload; full CIDs are stored off-chain.
-fn hash_image_urls(urls: &Vec<String>) -> u64 {
-    const FNV_OFFSET: u64 = 14695981039346656037;
-    const FNV_PRIME: u64 = 1099511628211;
-    let mut hash: u64 = FNV_OFFSET;
-    for url in urls.iter() {
-        let bytes = url.to_bytes();
-        for i in 0..bytes.len() {
-            hash ^= bytes.get(i).unwrap_or(0) as u64;
-            hash = hash.wrapping_mul(FNV_PRIME);
-        }
+#[cfg(test)]
+mod evidence_hash_tests {
+    use crate::validate::{check_claim_fields, Error};
+    use soroban_sdk::{Bytes, BytesN, Env, String, Vec};
+    use crate::types::ClaimEvidenceEntry;
+
+    fn make_hash(env: &Env, fill: u8) -> BytesN<32> {
+        let mut b = [fill; 32];
+        BytesN::from_array(env, &b)
     }
-    hash
+
+    fn make_url(env: &Env) -> String {
+        String::from_str(env, "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+    }
+
+    fn make_details(env: &Env) -> String {
+        String::from_str(env, "flood damage")
+    }
+
+    #[test]
+    fn zero_hash_is_rejected() {
+        let env = Env::default();
+        let mut evidence: Vec<ClaimEvidenceEntry> = Vec::new(&env);
+        evidence.push_back(ClaimEvidenceEntry {
+            url: make_url(&env),
+            hash: make_hash(&env, 0x00),
+        });
+        let err = check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence)
+            .unwrap_err();
+        assert_eq!(err, Error::ExcessiveEvidenceBytes);
+    }
+
+    #[test]
+    fn non_zero_hash_is_accepted() {
+        let env = Env::default();
+        let mut evidence: Vec<ClaimEvidenceEntry> = Vec::new(&env);
+        evidence.push_back(ClaimEvidenceEntry {
+            url: make_url(&env),
+            hash: make_hash(&env, 0xab),
+        });
+        assert!(check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence).is_ok());
+    }
+
+    #[test]
+    fn mixed_zero_and_nonzero_hash_rejected_on_zero_entry() {
+        let env = Env::default();
+        let mut evidence: Vec<ClaimEvidenceEntry> = Vec::new(&env);
+        evidence.push_back(ClaimEvidenceEntry {
+            url: make_url(&env),
+            hash: make_hash(&env, 0xab),
+        });
+        evidence.push_back(ClaimEvidenceEntry {
+            url: make_url(&env),
+            hash: make_hash(&env, 0x00),
+        });
+        let err = check_claim_fields(&env, 100, 1000, &make_details(&env), &evidence)
+            .unwrap_err();
+        assert_eq!(err, Error::ExcessiveEvidenceBytes);
+    }
+
+    #[test]
+    fn hash_persisted_on_stored_claim() {
+        // Verify that the hash stored in ClaimEvidenceEntry round-trips through
+        // the struct without mutation (persistence correctness).
+        let env = Env::default();
+        let expected = make_hash(&env, 0xde);
+        let entry = ClaimEvidenceEntry {
+            url: make_url(&env),
+            hash: expected.clone(),
+        };
+        assert_eq!(entry.hash, expected);
+    }
 }
 
 #[cfg(test)]

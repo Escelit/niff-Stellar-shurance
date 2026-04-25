@@ -1,11 +1,44 @@
 {
-  "contracts": [
-    {
-      "name": "niffyinsure",
-      "contractId": "${CONTRACT_ID}",
-      "expectedWasmHash": "${NIFFYINSURE_EXPECTED_WASM_HASH}",
-      "deployedAt": "2025-01-01T00:00:00Z",
-      "notes": "Replace CONTRACT_ID and NIFFYINSURE_EXPECTED_WASM_HASH with real values before first deploy. Run `sha256sum niffyinsure.wasm` after each release build and update this file."
+  "_comment": "After each deploy, call the version() entrypoint via simulation and record the result in deployedVersion. Alert if deployedVersion does not match expectedVersion.",
+  "networks": {
+    "testnet": {
+      "contracts": [
+        {
+          "name": "niffyinsure",
+          "contractId": "${CONTRACT_ID_TESTNET}",
+          "expectedWasmHash": "${NIFFYINSURE_EXPECTED_WASM_HASH}",
+          "expectedVersion": "${NIFFYINSURE_EXPECTED_VERSION}",
+          "deployedVersion": "",
+          "deployedAt": "",
+          "notes": "Testnet deployment. Set CONTRACT_ID_TESTNET env var. Run `sha256sum niffyinsure.wasm` after each build. After deploy, simulate version() and record result in deployedVersion."
+        }
+      ]
+    },
+    "mainnet": {
+      "contracts": [
+        {
+          "name": "niffyinsure",
+          "contractId": "${CONTRACT_ID_MAINNET}",
+          "expectedWasmHash": "${NIFFYINSURE_EXPECTED_WASM_HASH}",
+          "expectedVersion": "${NIFFYINSURE_EXPECTED_VERSION}",
+          "deployedVersion": "",
+          "deployedAt": "",
+          "notes": "Mainnet deployment. CONTRACT_ID_MAINNET is REQUIRED at startup — server refuses to start without it. After deploy, simulate version() and record result in deployedVersion. Alert if deployedVersion != expectedVersion."
+        }
+      ]
+    },
+    "futurenet": {
+      "contracts": [
+        {
+          "name": "niffyinsure",
+          "contractId": "${CONTRACT_ID_FUTURENET}",
+          "expectedWasmHash": "${NIFFYINSURE_EXPECTED_WASM_HASH}",
+          "expectedVersion": "${NIFFYINSURE_EXPECTED_VERSION}",
+          "deployedVersion": "",
+          "deployedAt": "",
+          "notes": "Futurenet deployment. Set CONTRACT_ID_FUTURENET env var. After deploy, simulate version() and record result in deployedVersion."
+        }
+      ]
     }
-  ]
+  }
 }

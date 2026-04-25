@@ -181,14 +181,32 @@ describe('IdempotencyMiddleware', () => {
   });
 
   test('version mismatch treated as cache miss', async () => {
-    // Stored entry has old version
-    getEntry.mockResolvedValue({ status: 200, body: { old: true }, version: IDEMPOTENCY_VERSION - 1 });
-    // getIdempotencyEntry already filters by version — returns null for mismatch
+    // getIdempotencyEntry returns null for version mismatch (handled inside cache helper)
     getEntry.mockResolvedValue(null);
 
     const req = makeReq({ headers: { 'idempotency-key': VALID_KEY } });
     const next = jest.fn();
     await middleware.use(req, makeRes(), next);
     expect(next).toHaveBeenCalled();
+  });
+
+  test('idempotency window expiry allows re-submission after TTL', async () => {
+    // First call - cache miss, stores entry
+    const req1 = makeReq({ headers: { 'idempotency-key': VALID_KEY } });
+    const res1 = makeRes();
+    await middleware.use(req1, res1, jest.fn());
+    res1.json({ id: 'claim-1' });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(setEntry).toHaveBeenCalledTimes(1);
+
+    // Simulate TTL expiry: getEntry returns null again
+    getEntry.mockResolvedValue(null);
+    const req2 = makeReq({ headers: { 'idempotency-key': VALID_KEY } });
+    const res2 = makeRes();
+    const next2 = jest.fn();
+    await middleware.use(req2, res2, next2);
+
+    // After expiry, request is processed fresh
+    expect(next2).toHaveBeenCalled();
   });
 });

@@ -121,6 +121,19 @@ export class QuorumProgressDto {
   @Expose()
   @IsBoolean()
   reached!: boolean;
+
+  @ApiProperty({ description: 'Quorum progress percentage from aggregation service (0-100)' })
+  @Expose()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  quorum_progress_pct!: number;
+
+  @ApiProperty({ description: 'Additional votes needed to reach quorum' })
+  @Expose()
+  @IsInt()
+  @Min(0)
+  votes_needed!: number;
 }
 
 export class DeadlineDto {
@@ -145,6 +158,11 @@ export class DeadlineDto {
   @IsOptional()
   @IsNumber()
   remainingSeconds?: number;
+
+  @ApiProperty({ description: 'Human-readable UTC deadline estimate' })
+  @Expose()
+  @IsString()
+  deadline_estimate_utc!: string;
 }
 
 export class SanitizedEvidenceDto {
@@ -192,6 +210,15 @@ export class ConsistencyMetadataDto {
   @Expose()
   @IsBoolean()
   isStale!: boolean;
+
+  @ApiProperty({
+    description:
+      'Whether the stored vote tallies reconcile with the count of individual vote rows. ' +
+      'False indicates a data-quality issue — display a warning on the claims board.',
+  })
+  @Expose()
+  @IsBoolean()
+  tallyReconciled!: boolean;
 }
 
 export class ClaimListItemDto {

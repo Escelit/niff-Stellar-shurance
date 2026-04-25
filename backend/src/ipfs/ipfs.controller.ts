@@ -131,6 +131,12 @@ export class IpfsController {
             'https://cloudflare-ipfs.com/ipfs/QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco',
           ],
         },
+        contentSha256Hex: {
+          type: 'string',
+          example:
+            'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+          description: 'SHA-256 of uploaded bytes (64 hex chars); use in file_claim evidence.',
+        },
         filename: { type: 'string', example: 'document.pdf' },
         size: { type: 'number', example: 123456 },
         mimeType: { type: 'string', example: 'application/pdf' },
@@ -266,7 +272,7 @@ export class IpfsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Check IPFS service health',
-    description: 'Returns the health status of the IPFS provider.',
+    description: 'Returns the health status of the IPFS provider chain, including all configured providers.',
   })
   @ApiResponse({
     status: 200,
@@ -275,15 +281,29 @@ export class IpfsController {
       type: 'object',
       properties: {
         healthy: { type: 'boolean' },
-        provider: { type: 'string' },
+        primaryProvider: { type: 'string' },
+        providers: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              provider: { type: 'string' },
+              healthy: { type: 'boolean' },
+              lastCheckedAt: { type: 'string', format: 'date-time' },
+              consecutiveFailures: { type: 'number' },
+            },
+          },
+        },
       },
     },
   })
   async healthCheck() {
     const isHealthy = await this.ipfsService.isHealthy();
+    const healthStatus = this.ipfsService.getProviderHealthStatus();
     return {
       healthy: isHealthy,
-      provider: this.ipfsService.getProviderName(),
+      primaryProvider: this.ipfsService.getProviderName(),
+      providers: healthStatus,
     };
   }
 }

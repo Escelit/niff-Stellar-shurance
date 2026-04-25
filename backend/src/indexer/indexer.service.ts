@@ -1,8 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { SorobanService } from '../rpc/soroban.service';
+import { MetricsService } from '../metrics/metrics.service';
+import { parseEvent } from '../events/events.schema';
+import {
+  selectParser,
+  initDeploymentRegistry,
+  isWarningRow,
+} from '../events/parser-registry';
+import { ClaimEventsService } from '../events/claim-events.service';
 import { rpc as SorobanRpc, scValToNative } from '@stellar/stellar-sdk';
+import { tryNormalizeAddress } from '../common/utils/normalize-address';
 
 type IndexerTx = Prisma.TransactionClient;
 type SorobanEvent = SorobanRpc.Api.EventResponse;
@@ -74,63 +84,180 @@ const getStringArray = (value: unknown): string[] => {
 export class IndexerService {
   private readonly logger = new Logger(IndexerService.name);
   private readonly BATCH_SIZE = 50;
+  private readonly networkId: string;
+  private readonly gapThresholdLedgers: number;
+  private readonly gapCooldownMs: number;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly soroban: SorobanService,
-  ) {}
+    private readonly config: ConfigService,
+    @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly claimEvents?: ClaimEventsService,
+  ) {
+    this.networkId = this.config.get<string>('STELLAR_NETWORK', 'testnet');
+    this.gapThresholdLedgers = this.config.get<number>('INDEXER_GAP_ALERT_THRESHOLD_LEDGERS', 100);
+    this.gapCooldownMs = this.config.get<number>('INDEXER_GAP_ALERT_COOLDOWN_MS', 3_600_000);
 
-  async processNextBatch() {
-    const state = await this.getState();
+    // Bootstrap parser registry from env. Extend DEPLOYMENT_REGISTRY entries
+    // when a new contract version is deployed (add fromLedger of the upgrade ledger).
+    const contractId = this.config.get<string>('CONTRACT_ID', '');
+    if (contractId) {
+      initDeploymentRegistry([
+        { contractId, schemaVersion: 1, fromLedger: 0 },
+      ]);
+    }
+  }
+
+  /** Bull reindex job: drain backlog for a network after cursor reset. */
+  async processUntilCaughtUp(network?: string): Promise<{ batches: number; events: number }> {
+    const net = network ?? this.networkId;
+    let batches = 0;
+    let events = 0;
+    for (;;) {
+      const r = await this.processNextBatchForNetwork(net);
+      batches += 1;
+      events += r.processed;
+      if (r.processed === 0) {
+        break;
+      }
+      if (batches > 10_000) {
+        this.logger.warn(`processUntilCaughtUp stopped after ${batches} batches (safety cap)`);
+        break;
+      }
+    }
+    this.logger.log(`Reindex catch-up finished for ${net}: ${events} events in ${batches} batches`);
+    return { batches, events };
+  }
+
+  async processNextBatch(): Promise<{ processed: number; lag: number }> {
+    return this.processNextBatchForNetwork(this.networkId);
+  }
+
+  async processNextBatchForNetwork(network: string): Promise<{ processed: number; lag: number }> {
+    const cursorRow = await this.ensureCursor(network);
+    const lastProcessed = cursorRow.lastProcessedLedger;
     const latestLedger = await this.soroban.getLatestLedger();
 
-    if (state.lastLedger >= latestLedger) {
+    const gap = latestLedger - lastProcessed;
+    if (gap > this.gapThresholdLedgers) {
+      await this.maybeEmitGapAlert(network, gap, lastProcessed, latestLedger);
+    }
+
+    this.metrics?.recordIndexerLag({ network, lag: gap });
+
+    if (lastProcessed >= latestLedger) {
+      this.metrics?.recordIndexerLag({ network, lag: 0 });
       return { processed: 0, lag: 0 };
     }
 
-    const startLedger = state.lastLedger + 1;
-    this.logger.debug(`Fetching events starting from ledger ${startLedger}`);
+    const startLedger = lastProcessed + 1;
+    this.logger.debug(`[${network}] Fetching events from ledger ${startLedger}`);
 
     const response = await this.soroban.getEvents(startLedger, this.BATCH_SIZE);
     const events = response.events || [];
 
     if (events.length === 0) {
-      const newLastLedger = Math.min(startLedger + 100, latestLedger);
-      await this.updateState(newLastLedger);
-      return { processed: 0, lag: latestLedger - newLastLedger };
+      const newLast = Math.min(startLedger + 100, latestLedger);
+      await this.prisma.$transaction(async (tx) => {
+        await this.advanceCursorInTx(tx, network, newLast);
+      });
+      return { processed: 0, lag: latestLedger - newLast };
     }
 
     let processedCount = 0;
     for (let i = 0; i < events.length; i++) {
-      await this.processEvent(events[i], i);
+      await this.processEventForNetwork(network, events[i], i);
       processedCount++;
     }
 
-    const maxLedger = Math.max(...events.map((e: any) => e.ledger));
-    await this.updateState(maxLedger);
-
-    return { processed: processedCount, lag: latestLedger - maxLedger };
+    const maxLedger = Math.max(...events.map((e: SorobanEvent) => e.ledger));
+    const lag = latestLedger - maxLedger;
+    this.metrics?.recordIndexerLag({ network, lag });
+    return { processed: processedCount, lag };
   }
 
-  private async getState() {
-    let state = await this.prisma.indexerState.findFirst();
-    if (!state) {
-      state = await this.prisma.indexerState.create({ data: { lastLedger: 0 } });
+  private async ensureCursor(network: string): Promise<{ lastProcessedLedger: number }> {
+    let row = await this.prisma.ledgerCursor.findUnique({ where: { network } });
+    if (row) {
+      return row;
     }
-    return state;
+
+    const legacy = await this.prisma.indexerState.findFirst({
+      orderBy: { id: 'asc' },
+    });
+    const initial = legacy?.lastLedger ?? 0;
+    row = await this.prisma.ledgerCursor.create({
+      data: { network, lastProcessedLedger: initial },
+    });
+    this.logger.log(`Initialized ledger cursor for ${network} from legacy state: ${initial}`);
+    return row;
   }
 
-  private async updateState(lastLedger: number) {
-    await this.prisma.indexerState.updateMany({
-      data: { lastLedger, updatedAt: new Date() },
+  /**
+   * Advance cursor to at least `ledger` (monotonic). Caller must run inside a transaction
+   * that also persists the events/projections for that ledger.
+   */
+  private async advanceCursorInTx(tx: IndexerTx, network: string, ledger: number): Promise<void> {
+    const cur = await tx.ledgerCursor.findUnique({ where: { network } });
+    const next = Math.max(cur?.lastProcessedLedger ?? 0, ledger);
+    await tx.ledgerCursor.upsert({
+      where: { network },
+      create: { network, lastProcessedLedger: next },
+      update: { lastProcessedLedger: next },
     });
   }
 
-  private async processEvent(event: SorobanEvent, index: number) {
-    const txHash = event.txHash;
-    const eventIndex = index;
+  private async maybeEmitGapAlert(
+    network: string,
+    gapSize: number,
+    lastProcessedLedger: number,
+    latestLedger: number,
+  ): Promise<void> {
+    const now = new Date();
+    const dedup = await this.prisma.ledgerGapAlertDedup.findUnique({
+      where: { network },
+    });
 
-    // Idempotency check handled by unique constraint on rawEvent table
+    if (dedup) {
+      const elapsed = now.getTime() - dedup.lastFiredAt.getTime();
+      if (elapsed < this.gapCooldownMs) {
+        return;
+      }
+    }
+
+    this.logger.warn(
+      JSON.stringify({
+        alert: 'indexer_ledger_gap',
+        network,
+        gapLedgers: gapSize,
+        lastProcessedLedger,
+        latestLedger,
+        threshold: this.gapThresholdLedgers,
+      }),
+    );
+
+    await this.prisma.ledgerGapAlertDedup.upsert({
+      where: { network },
+      create: {
+        network,
+        lastFiredAt: now,
+        lastGapSize: gapSize,
+        lastProcessedLedger,
+        latestLedger,
+      },
+      update: {
+        lastFiredAt: now,
+        lastGapSize: gapSize,
+        lastProcessedLedger,
+        latestLedger,
+      },
+    });
+  }
+
+  private async processEventForNetwork(network: string, event: SorobanEvent, index: number) {
+    const txHash = event.txHash;
+
     const topics: StellarNativeValue[] = event.topic.map((topic) => {
       try {
         return scValToNative(topic) as StellarNativeValue;
@@ -141,15 +268,12 @@ export class IndexerService {
     const dataNative = scValToNative(event.value) as EventPayload;
     const contractId = event.contractId?.toString() ?? '';
 
-    const parsed = parseEvent(topics, dataNative, event.ledger, txHash);
-
     await this.prisma.$transaction(async (tx) => {
-      // Idempotent raw-event store — unique constraint on (txHash, eventIndex).
       await tx.rawEvent.upsert({
         where: { txHash_eventIndex: { txHash, eventIndex: index } },
         create: {
           txHash,
-          eventIndex,
+          eventIndex: index,
           contractId,
           ledger: event.ledger,
           ledgerClosedAt: new Date(event.ledgerClosedAt),
@@ -162,6 +286,24 @@ export class IndexerService {
         update: {},
       });
 
+      // Use the versioned parser registry for deterministic event routing.
+      const parser = selectParser(contractId, event.ledger);
+      const parsed = parser.parse(topics, dataNative, event.ledger, txHash);
+
+      if (isWarningRow(parsed)) {
+        this.logger.warn(
+          JSON.stringify({
+            event: 'unknown_event_schema',
+            contractId: parsed.contractId,
+            ledger: parsed.ledger,
+            txHash: parsed.txHash,
+            reason: parsed.reason,
+          }),
+        );
+        await this.advanceCursorInTx(tx, network, event.ledger);
+        return;
+      }
+
       const mainTopic = topics[0]?.toString();
       const subTopic = topics[1]?.toString();
 
@@ -169,20 +311,38 @@ export class IndexerService {
         await this.handlePolicyInitiated(tx, dataNative, event);
       } else if (mainTopic === 'policy' && subTopic === 'renewed') {
         await this.handlePolicyRenewed(tx, dataNative);
-      } else if (mainTopic === 'claim' && subTopic === 'filed') {
+      } else if (
+        (mainTopic === 'claim' && subTopic === 'filed') ||
+        (mainTopic === 'niffyinsure' && subTopic === 'claim_filed')
+      ) {
         await this.handleClaimFiled(tx, dataNative, event);
       } else if (mainTopic === 'vote') {
-        await this.handleVoteCast(tx, topics, dataNative, event);
-      } else if (mainTopic === 'claim_pd') {
+        await this.handleVoteCast(tx, topics, dataNative as EventPayload, event);
+      } else if (
+        mainTopic === 'claim_pd' ||
+        (mainTopic === 'niffyinsure' && subTopic === 'claim_paid')
+      ) {
         await this.handleClaimProcessed(tx, dataNative, event);
+      } else if (mainTopic === 'niffyins' && subTopic === 'tbl_upd') {
+        await this.handlePremiumTableUpdated();
       }
+
+      await this.advanceCursorInTx(tx, network, event.ledger);
     });
   }
 
   private async handlePolicyInitiated(tx: IndexerTx, data: EventPayload, event: SorobanEvent) {
-    const holder = getStringValue(data.holder);
+    const holder = tryNormalizeAddress(getStringValue(data.holder)) ?? getStringValue(data.holder);
     const policyId = getNumberValue(data.policy_id);
     const id = `${holder}:${policyId}`;
+
+    // Extract the SEP-41 asset contract ID bound at policy initiation.
+    // Present in all new PolicyInitiated events; null for legacy policies
+    // created before multi-asset support was added.
+    const assetContractId =
+      data.asset != null && data.asset !== ''
+        ? getStringValue(data.asset)
+        : null;
 
     await tx.policy.upsert({
       where: { id },
@@ -197,77 +357,91 @@ export class IndexerService {
         isActive: true,
         startLedger: getNumberValue(data.start_ledger),
         endLedger: getNumberValue(data.end_ledger),
+        assetContractId,
         txHash: event.txHash,
         eventIndex: 0,
       },
       update: {
         isActive: true,
         endLedger: getNumberValue(data.end_ledger),
+        // Only update assetContractId if the event carries one; never overwrite
+        // a known asset with null (re-index safety for legacy rows).
+        ...(assetContractId != null ? { assetContractId } : {}),
         updatedAt: new Date(),
-      }
+      },
     });
   }
 
   private async handlePolicyRenewed(tx: IndexerTx, data: EventPayload) {
-    const id = `${getStringValue(data.holder)}:${getNumberValue(data.policy_id)}`;
+    const holder = tryNormalizeAddress(getStringValue(data.holder)) ?? getStringValue(data.holder);
+    const id = `${holder}:${getNumberValue(data.policy_id)}`;
     await tx.policy.update({
       where: { id },
       data: {
         endLedger: getNumberValue(data.new_end_ledger),
         updatedAt: new Date(),
-      }
+      },
     });
   }
 
+  /**
+   * On-chain `ClaimFiled` carries claim_id + holder in topics and `evidence_hashes` in the value.
+   * Full claim rows need policy_id / amount / URLs from `get_claim` — backfill TBD.
+   */
   private async handleClaimFiled(tx: IndexerTx, data: EventPayload, event: SorobanEvent) {
     const claimId = getNumberValue(data.claim_id);
-    const id = `${getStringValue(data.claimant)}:${getNumberValue(data.policy_id)}`;
+    const policyDbId = `${getStringValue(data.claimant)}:${getNumberValue(data.policy_id)}`;
 
-  private async handleClaimFiled(tx: any, data: ClaimFiledEvent, ids: unknown[], event: any) {
-    // ids[0] = claim_id (u64), ids[1] = holder (Address)
-    const claimId = Number(ids[0]);
-    const holder = String(ids[1]);
-    const policyDbId = `${holder}:${data.policy_id}`;
     await tx.claim.upsert({
       where: { id: claimId },
       create: {
         id: claimId,
-        policyId: id,
+        policyId: policyDbId,
         creatorAddress: getStringValue(data.claimant),
         amount: getStringValue(data.amount),
-        asset: getStringValue(data.asset),
+        asset: data.asset != null && data.asset !== '' ? getStringValue(data.asset) : null,
         description: getStringValue(data.details),
         imageUrls: getStringArray(data.image_urls),
         status: 'PENDING',
         approveVotes: 0,
         rejectVotes: 0,
         createdAtLedger: event.ledger,
+        updatedAtLedger: event.ledger,
         txHash: event.txHash,
+        eventIndex: 0,
       },
       update: {
-        // Already exists from previous vote or processing (shouldn't happen with correct order but handle it)
         amount: getStringValue(data.amount),
         description: getStringValue(data.details),
         imageUrls: getStringArray(data.image_urls),
-      }
+      },
+    });
+
+    await this.claimEvents?.publish({
+      claimId: String(claimId),
+      status: 'PENDING',
+      updatedAt: new Date().toISOString(),
+      ledger: event.ledger,
     });
   }
 
   private async handleVoteCast(
     tx: IndexerTx,
     topics: StellarNativeValue[],
-    data: StellarNativeValue,
+    data: EventPayload,
     event: SorobanEvent,
   ) {
     const claimId = Number(topics[1]);
     const voter = topics[2]?.toString();
-    const option = getStringValue(data); // VoteOption enum: "Approve" or "Reject"
+    const option = getStringValue(data.vote ?? data);
 
     if (!voter) {
       this.logger.warn(`Skipping vote event for claim ${claimId}: missing voter topic`);
       return;
     }
 
+    // Idempotent upsert — unique constraint on (claimId, voterAddress) prevents duplicates.
+    // update:{} means a duplicate event is a no-op; tally is recomputed from COUNT below.
     await tx.vote.upsert({
       where: { claimId_voterAddress: { claimId, voterAddress: voter } },
       create: {
@@ -279,36 +453,51 @@ export class IndexerService {
       },
       update: {
         vote: option === 'Approve' ? 'APPROVE' : 'REJECT',
-      }
+      },
     });
-    await tx.claim.update({
-      where: { id: claimId },
-      data: { approveVotes: data.approve_votes, rejectVotes: data.reject_votes },
-    });
-  }
 
-  private async handleClaimFinalized(tx: any, data: ClaimFinalizedEvent, ids: unknown[]) {
-    const claimId = Number(ids[0]);
     await tx.claim.update({
       where: { id: claimId },
       data: {
-        status: data.status === 'Approved' ? 'APPROVED' : 'REJECTED',
-        approveVotes: data.approve_votes,
-        rejectVotes: data.reject_votes,
-        updatedAtLedger: data.at_ledger,
+        approveVotes: getNumberValue(data.approve_votes),
+        rejectVotes: getNumberValue(data.reject_votes),
       },
+    });
+
+    await this.claimEvents?.publish({
+      claimId: String(claimId),
+      status: 'VOTING',
+      updatedAt: new Date().toISOString(),
+      ledger: event.ledger,
     });
   }
 
   private async handleClaimProcessed(tx: IndexerTx, data: EventPayload, event: SorobanEvent) {
     const claimId = getNumberValue(data.claim_id);
-    await tx.claim.update({
-      where: { id: claimId },
+    await tx.claim.updateMany({
+      where: { id: claimId, deletedAt: null },
       data: {
         status: 'PAID',
         paidAt: new Date(event.ledgerClosedAt),
         updatedAtLedger: event.ledger,
-      }
+      },
     });
+
+    await this.claimEvents?.publish({
+      claimId: String(claimId),
+      status: 'PAID',
+      updatedAt: new Date(event.ledgerClosedAt).toISOString(),
+      ledger: event.ledger,
+    });
+  }
+
+  /**
+   * On-chain `tbl_upd` means the premium multiplier table was updated.
+   * Flush the entire quote simulation cache so subsequent requests
+   * re-simulate against the new on-chain multipliers.
+   */
+  private async handlePremiumTableUpdated(): Promise<void> {
+    await this.quoteSimulationCache?.invalidateAll();
+    this.logger.log('Quote simulation cache invalidated after tbl_upd event');
   }
 }

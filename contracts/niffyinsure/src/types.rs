@@ -1,8 +1,9 @@
-use soroban_sdk::{contractevent, contracttype, Address, Bytes, Map, String, Vec};
+use soroban_sdk::{contractevent, contracttype, Address, Bytes, BytesN, Map, String, Vec};
 
 // ── Field size limits ─────────────────────────────────────────────────────────
 pub const DETAILS_MAX_LEN: u32 = 256;
 pub const IMAGE_URL_MAX_LEN: u32 = 128;
+/// Max evidence attachments per claim (URL + SHA-256 commitment each).
 pub const IMAGE_URLS_MAX: u32 = 5;
 pub const REASON_MAX_LEN: u32 = 128;
 pub const SAFETY_SCORE_MAX: u32 = 100;
@@ -57,6 +58,19 @@ pub use crate::ledger::{
 /// can be reversed by a successful appeal that decrements strikes back below it.
 pub const STRIKE_DEACTIVATION_THRESHOLD: u32 = 3;
 
+// ── Claim voting quorum (basis points) ────────────────────────────────────────
+
+/// Default participation quorum when instance `QuorumBps` is unset, and fallback for
+/// claims filed before per-claim quorum snapshots existed.
+pub const DEFAULT_QUORUM_BPS: u32 = 5000;
+
+/// Admin `quorum_bps` must satisfy `QUORUM_BPS_MIN <= quorum_bps <= QUORUM_BPS_MAX`.
+pub const QUORUM_BPS_MIN: u32 = 1;
+pub const QUORUM_BPS_MAX: u32 = 10_000;
+
+/// One full turn-out / 100% weight in bps (used in the quorum formula below).
+pub const QUORUM_BPS_DENOMINATOR: u32 = 10_000;
+
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -91,11 +105,14 @@ pub enum CoverageTier {
     Premium,
 }
 
-/// Claim lifecycle state machine.
+/// Alias for [`CoverageTier`] used in the renewal entrypoint and legacy test helpers.
+/// Both names refer to the same on-chain enum; prefer `CoverageTier` in new code.
+pub type CoverageType = CoverageTier;
 ///
 /// Base-flow transitions:
-///   Processing  → Approved      (majority approve vote or deadline plurality)
-///   Processing  → Rejected      (majority reject vote or deadline plurality/tie)
+///   Processing  → Approved      (participation quorum met + more approve than reject votes cast)
+///   Processing  → Rejected      (participation quorum met + reject wins or tie; or deadline with no quorum)
+///   Processing  → Withdrawn     (claimant calls `withdraw_claim` before any vote is cast)
 ///   Approved    → Paid          (admin calls process_claim)
 ///
 /// Appeal-flow transitions (requires Rejected status + open appeal window):
@@ -105,7 +122,7 @@ pub enum CoverageTier {
 ///   AppealApproved → Paid       (admin calls process_claim — same as Approved)
 ///
 /// Terminal states (no further transitions): Paid, Rejected (after appeal window
-/// closes), AppealApproved (→ Paid only), AppealRejected.
+/// closes), AppealApproved (→ Paid only), AppealRejected, Withdrawn.
 #[contracttype]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ClaimStatus {
@@ -120,6 +137,8 @@ pub enum ClaimStatus {
     AppealApproved,
     /// Appeal vote rejected; claim is permanently closed.
     AppealRejected,
+    /// Claimant withdrew before voting began; record kept for audit; no payout.
+    Withdrawn,
 }
 
 impl ClaimStatus {
@@ -131,6 +150,7 @@ impl ClaimStatus {
                 | ClaimStatus::Rejected
                 | ClaimStatus::AppealApproved
                 | ClaimStatus::AppealRejected
+                | ClaimStatus::Withdrawn
         )
     }
 }
@@ -233,7 +253,7 @@ pub struct PolicyLookupKey {
 
 /// Lightweight policy summary returned by `list_policies`.
 ///
-/// Omits large or rarely-needed fields (`details`, `image_urls`, etc.) to keep
+/// Omits large or rarely-needed fields (`details`, `evidence`, etc.) to keep
 /// per-page byte cost predictable.  Callers that need the full record should
 /// follow up with `get_policy(holder, policy_id)`.
 #[contracttype]
@@ -248,7 +268,7 @@ pub struct PolicySummary {
 
 /// Lightweight claim summary returned by `list_claims`.
 ///
-/// Omits `details` and `image_urls` to keep per-page byte cost predictable.
+/// Omits `details` and `evidence` to keep per-page byte cost predictable.
 /// Callers that need the full record should follow up with `get_claim(claim_id)`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -256,10 +276,30 @@ pub struct ClaimSummary {
     pub claim_id: u64,
     pub policy_id: u32,
     pub amount: i128,
+    /// Deductible snapshot (from filing); net payout is not stored here — see payout events.
+    pub deductible: i128,
     pub status: ClaimStatus,
     pub filed_at: u32,
     /// Same field as `Claim::voting_deadline_ledger` — authoritative for UI / indexers.
     pub voting_deadline_ledger: u32,
+}
+
+// ── Claim evidence ───────────────────────────────────────────────────────────
+
+/// One evidence attachment: where to fetch bytes off-chain and a **SHA-256 content hash**
+/// the submitter asserts matches those bytes at filing time.
+///
+/// # On-chain limitation
+///
+/// This contract **does not** fetch `url` or recompute SHA-256 on-chain. It only stores
+/// the commitment. Off-chain services (NestJS IPFS proxy, verification workers) must
+/// download content and compare digests to `hash` for integrity.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimEvidenceEntry {
+    pub url: String,
+    /// SHA-256 digest (32 bytes). Filing rejects the all-zero digest.
+    pub hash: BytesN<32>,
 }
 
 // ── Premium engine structs ────────────────────────────────────────────────────
@@ -271,6 +311,18 @@ pub struct RiskInput {
     pub age_band: AgeBand,
     pub coverage: CoverageTier,
     pub safety_score: u32,
+}
+
+/// Bundles the optional/extra fields for `initiate_policy` to stay within
+/// Soroban's 10-parameter ABI limit. All fields are optional in MVP.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InitiatePolicyOptions {
+    pub beneficiary: Option<Address>,
+    pub deductible: Option<i128>,
+    /// Opt-in replay-protection nonce. Pass `None` to skip the check.
+    /// Supplementary to Stellar sequence numbers — not a replacement.
+    pub expected_nonce: Option<u64>,
 }
 
 #[contracttype]
@@ -295,6 +347,11 @@ pub struct ClaimProcessed {
     #[topic]
     pub claim_id: u64,
     pub recipient: Address,
+    /// Gross approved claim amount (before deductible), same units as policy asset.
+    pub gross_amount: i128,
+    /// Policy deductible applied at payout (snapshot from claim record).
+    pub deductible: i128,
+    /// Net token transfer: `gross_amount - deductible` (must be > 0 when this event fires).
     pub amount: i128,
 }
 
@@ -315,6 +372,17 @@ pub struct Policy {
     /// SEP-41 asset contract used for this policy's premium payment and claim payout.
     /// Must be allowlisted at the time of policy initiation.
     pub asset: Address,
+    /// Optional per-claim deductible in the **same asset units** as premium and payout.
+    ///
+    /// # Product rule (coverage cap interaction)
+    /// The per-claim coverage cap enforced at filing is `coverage` (see `check_claim_fields`).
+    /// The deductible does **not** reduce that cap: the claimant may file up to `coverage` stroops.
+    /// At payout, **deductible is subtracted from the approved claim amount** (gross), so the
+    /// treasury transfers `gross - deductible` when net &gt; 0; otherwise `process_claim` returns
+    /// `ClaimAmountZero` on `validate::Error` (no spare `contracterror` variant on this contract).
+    ///
+    /// `None` or omitted semantics: treated as zero deductible at bind and payout.
+    pub deductible: Option<i128>,
     /// Optional payout destination for approved claims. When unset (`None`), funds are sent to `holder`.
     ///
     /// **Phishing / social-engineering risk:** A malicious interface could trick the holder into
@@ -346,6 +414,19 @@ pub struct Policy {
     pub strike_count: u32,
 }
 
+/// Return value of [`crate::policy::renew_policy`].
+///
+/// When the policy is already at or past `end_ledger`, the call **succeeds** with [`Lapsed`](Self::Lapsed)
+/// so that [`crate::policy::PolicyExpired`] and idempotency storage are committed (a failed `Result::Err`
+/// invocation would roll those writes back).
+#[contracttype]
+#[derive(Clone)]
+pub enum RenewPolicyOutcome {
+    Renewed(Policy),
+    /// Ledger is at or after `end_ledger`; expiry notice recorded if due; no premium taken.
+    Lapsed,
+}
+
 /// On-chain claim record.
 ///
 /// `filed_at` is the ledger sequence at which the claim was filed.
@@ -359,10 +440,13 @@ pub struct Claim {
     pub policy_id: u32,
     pub claimant: Address,
     pub amount: i128,
+    /// Deductible copied from the policy at `file_claim` time (0 if policy had no deductible).
+    pub deductible: i128,
     /// SEP-41 asset contract bound to the policy at filing time.
     pub asset: Address,
     pub details: String,
-    pub image_urls: Vec<String>,
+    /// Evidence attachments (URL + SHA-256 content commitment per entry).
+    pub evidence: Vec<ClaimEvidenceEntry>,
     pub status: ClaimStatus,
     pub voting_deadline_ledger: u32,
     pub approve_votes: u32,
@@ -385,6 +469,18 @@ pub struct Claim {
     /// [`CLAIM_STATUS_HISTORY_MAX`]; on overflow the oldest entries are removed.
     /// May be incomplete if the cap is exceeded; `status` is authoritative.
     pub status_history: Vec<ClaimStatusHistoryEntry>,
+}
+
+/// Per-policy rolling window accumulator for **paid** claim amounts (same ledger window for all policies).
+///
+/// `window_start` is the first ledger of the bucket: `floor(now / window_len) * window_len`.
+/// `cumulative_paid` resets when the bucket changes. Indexers can derive **remaining** as
+/// `min(rolling_claim_cap - cumulative_paid, policy.coverage)` for UX (cap is global).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RollingClaimWindowState {
+    pub window_start: u32,
+    pub cumulative_paid: i128,
 }
 
 #[contracttype]
@@ -436,11 +532,9 @@ pub struct PremiumQuote {
 pub enum OracleSource {
     /// Stub: no trusted source defined yet.
     Undefined,
-    // Future variants (examples only — NOT implemented):
-    // WeatherStation(Address),
-    // FlightTracker(Address),
-    // PriceFeed { asset: String, threshold: i128 },
-    // MultiSigOracle(Vec<Address>),
+    /// A registered oracle identified by its on-chain address.
+    /// The address must have a corresponding Ed25519 public key registered via `set_oracle_pub_key`.
+    Registered(Address),
 }
 
 /// Placeholder enum for trigger event types.
@@ -458,11 +552,8 @@ pub enum OracleSource {
 pub enum TriggerEventType {
     /// Stub: no trigger type defined yet.
     Undefined,
-    // Future variants (examples only — NOT implemented):
-    // WeatherEvent { event_code: u32, threshold_value: i128 },
-    // FlightCancellation { flight_id: String },
-    // PriceDeviation { asset: String, deviation_bps: u32 },
-    // Custom { namespace: String, predicate: Vec<u8> },
+    /// A weather-related parametric trigger (e.g., storm, flood, drought).
+    WeatherEvent,
 }
 
 /// On-chain oracle trigger record.
@@ -496,16 +587,14 @@ pub struct OracleTrigger {
     pub timestamp: u64,
     /// Ledger sequence when this trigger was recorded.
     pub trigger_ledger: u32,
-    /// Reserved for future Ed25519/EdDSA signature verification.
+    /// Replay protection nonce (must be strictly increasing per source).
+    pub nonce: u64,
+    /// Ed25519 signature over (policy_id || event_type || payload || timestamp || nonce).
     ///
     /// CRITICAL SECURITY NOTE:
-    /// This field MUST be empty in all current builds.  Signature
-    /// verification is NOT implemented.  Any non-empty signature
-    /// should be treated as INVALID until crypto review completes.
-    ///
-    /// DO NOT PARSE: This field may contain arbitrary data that could
-    /// trigger parsing vulnerabilities if interpreted without validation.
-    pub signature: Bytes,
+    /// Signature verification is now implemented. The signature must be valid
+    /// Ed25519 signature from the registered oracle public key for this source.
+    pub signature: BytesN<64>,
 }
 
 #[cfg(not(feature = "experimental"))]
@@ -518,7 +607,8 @@ pub struct OracleTrigger {
     pub payload: Bytes,
     pub timestamp: u64,
     pub trigger_ledger: u32,
-    pub signature: Bytes,
+    pub nonce: u64,
+    pub signature: BytesN<64>,
 }
 
 /// Status of an oracle trigger in the resolution pipeline.

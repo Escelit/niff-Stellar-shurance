@@ -1,3 +1,7 @@
+// OpenTelemetry instrumentation MUST be imported before any other module
+// so that auto-instrumentation patches are applied at load time.
+import './tracing'
+
 import { NestFactory } from "@nestjs/core";
 import { ValidationPipe, Logger } from "@nestjs/common";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
@@ -7,6 +11,14 @@ import helmet from "helmet";
 import { ConfigService } from "@nestjs/config";
 import { RequestContextMiddleware } from "./common/middleware/request-context.middleware";
 import type { Request, Response, NextFunction } from "express";
+import { loadNetworkConfig } from "./config/network.config";
+import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
+import { validateEnvironment } from "./config/env.validation";
+import { MetricsService } from './metrics/metrics.service';
+import { setRedisCacheMetricsService } from './redis/cache';
+import { setRedisClientMetricsService } from './redis/client';
+import { AppLoggerService } from "./common/logger/app-logger.service";
+import { EnvironmentVariables } from "./config/env.definitions";
 
 export function parseOrigins(raw: string): string[] {
   return raw
@@ -15,8 +27,47 @@ export function parseOrigins(raw: string): string[] {
     .filter(Boolean);
 }
 
+async function assertRpcPassphrase(networkConfig: ReturnType<typeof loadNetworkConfig>): Promise<void> {
+  const startupLogger = new Logger('NetworkAssertion');
+  try {
+    const server = new SorobanRpc.Server(networkConfig.rpcUrl, {
+      allowHttp: networkConfig.rpcUrl.startsWith('http://'),
+    });
+    const info = await server.getNetwork();
+    if (info.passphrase !== networkConfig.networkPassphrase) {
+      throw new Error(
+        'RPC passphrase mismatch. Check SOROBAN_RPC_URL and STELLAR_NETWORK_PASSPHRASE.',
+      );
+    }
+    startupLogger.log(`RPC passphrase verified for network: ${networkConfig.network}`);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('passphrase mismatch')) throw err;
+    // RPC unreachable at startup — log warning but don't block (offline dev)
+    startupLogger.warn(`Could not verify RPC passphrase because the RPC endpoint was unreachable: ${String(err)}`);
+  }
+}
+
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  validateEnvironment(process.env);
+
+  // Validate and load network config before anything else — fail fast.
+  const networkConfig = loadNetworkConfig();
+  const startupLogger = new Logger('Bootstrap');
+  startupLogger.log(
+    `🌐 Active network: ${networkConfig.network.toUpperCase()} | ` +
+      `RPC: ${networkConfig.rpcUrl}`,
+  );
+
+  await assertRpcPassphrase(networkConfig);
+
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const appLogger = app.get(AppLoggerService);
+  app.useLogger(appLogger);
+
+  // Wire MetricsService into Redis standalone modules (lazy injection)
+  const metricsService = app.get(MetricsService);
+  setRedisCacheMetricsService(metricsService);
+  setRedisClientMetricsService(metricsService);
 
   // Global prefix
   app.setGlobalPrefix("api");
@@ -50,7 +101,7 @@ async function bootstrap() {
   });
 
   // CORS — admin UI gets its own restricted origin list
-  const configService = app.get(ConfigService);
+  const configService = app.get<ConfigService<EnvironmentVariables, true>>(ConfigService);
   const adminOrigins = parseOrigins(
     configService.get<string>("ADMIN_CORS_ORIGINS") ?? "",
   );
@@ -121,5 +172,21 @@ async function bootstrap() {
     "Bootstrap",
   );
   Logger.log(`📚 Swagger docs: http://localhost:${port}/docs`, "Bootstrap");
+  const graphqlEnabled = configService.get<boolean>('GRAPHQL_ENABLED', true);
+  if (graphqlEnabled) {
+    const graphqlPath = configService.get<string>('GRAPHQL_PATH', '/graphql');
+    Logger.log(
+      `🧭 GraphQL endpoint: http://localhost:${port}/api${graphqlPath}`,
+      'Bootstrap',
+    );
+  }
+  Logger.log(
+    `🌐 Network: ${networkConfig.network.toUpperCase()} | Contract: ${networkConfig.contractIds.niffyinsure || '(not set)'}`,
+    "Bootstrap",
+  );
 }
-bootstrap();
+bootstrap().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  Logger.error(message, undefined, 'Bootstrap');
+  process.exit(1);
+});
